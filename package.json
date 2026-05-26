@@ -1,0 +1,26 @@
+{
+  "name": "hearsay-relay",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Async mailbox/event relay between coding agents.",
+  "bin": {
+    "hearsay-relay-claude": "./dist/src/claude/channel-mcp-server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "claude:server": "tsx src/claude/channel-mcp-server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@sinclair/typebox": "^0.34.49",
+    "zod": "^4.4.3"
+  }
+}

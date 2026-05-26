@@ -1,0 +1,533 @@
+import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import type net from "node:net";
+import { fallbackColor, isValidHexColor, makeId, nowIso } from "./ids.js";
+import {
+  defaultRelayDir,
+  ensureRelayDirs,
+  makeEndpoint,
+  pruneDeadEntries,
+  pruneDeadEntriesAcrossProjects,
+  removeRegistryEntry,
+  resolveUniqueName,
+  writeRegistryAtomic,
+} from "./registry.js";
+import { bindEndpoint, readOneLine, sendEnvelope, writeAck, writeNack, writePong } from "./transport.js";
+import type {
+  AgentCard,
+  InboundPromptRecord,
+  OutboundPromptRecord,
+  PeerInfo,
+  PingEnvelope,
+  PromptEnvelope,
+  RegistryEntry,
+  RelayEnvelope,
+  RelayListOptions,
+  RelayPromptEvent,
+  RelayReplyArgs,
+  RelayReplyResult,
+  RelayResponseEvent,
+  RelayRuntimeEvents,
+  RelayRuntimeOptions,
+  RelaySendArgs,
+  RelaySendResult,
+  ResponseEnvelope,
+} from "./types.js";
+
+const DEFAULT_MAX_HOPS = 5;
+
+export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
+  readonly sessionId: string;
+  readonly relayDir: string;
+  readonly project: string;
+  readonly purpose: string;
+  readonly model: string;
+  readonly cwd: string;
+  readonly explicit: boolean;
+  readonly maxHops: number;
+
+  private readonly requestedName: string;
+  private readonly requestedColor?: string;
+  private readonly contextUsedPct?: () => number | null;
+  private server: net.Server | null = null;
+  private registryFile: string | null = null;
+  private endpointPath: string;
+  private runtimeName: string;
+  private runtimeColor: string;
+  private started = false;
+
+  private readonly inbound = new Map<string, InboundPromptRecord>();
+  private readonly outbound = new Map<string, OutboundPromptRecord>();
+  private readonly childrenByParent = new Map<string, Set<string>>();
+
+  constructor(options: RelayRuntimeOptions = {}) {
+    super();
+    this.sessionId = makeId("sess");
+    this.relayDir = options.relayDir ?? defaultRelayDir();
+    this.project = options.project ?? "default";
+    this.purpose = options.purpose ?? "";
+    this.model = options.model ?? "unknown";
+    this.cwd = options.cwd ?? process.cwd();
+    this.explicit = options.explicit === true;
+    this.maxHops = normalizeMaxHops(options.maxHops);
+    this.requestedName = options.name ?? `agent-${this.sessionId.slice(-6)}`;
+    this.requestedColor = options.color;
+    this.contextUsedPct = options.contextUsedPct;
+    this.endpointPath = makeEndpoint(this.relayDir, this.sessionId);
+    this.runtimeName = this.requestedName;
+    this.runtimeColor = options.color && isValidHexColor(options.color) ? options.color : fallbackColor(this.sessionId);
+  }
+
+  get name(): string {
+    return this.runtimeName;
+  }
+
+  get color(): string {
+    return this.runtimeColor;
+  }
+
+  get endpoint(): string {
+    return this.endpointPath;
+  }
+
+  get identity(): RegistryEntry | null {
+    if (!this.started) return null;
+    return this.makeRegistryEntry();
+  }
+
+  async start(): Promise<void> {
+    if (this.started) return;
+
+    ensureRelayDirs(this.relayDir, this.project);
+    this.runtimeName = resolveUniqueName(this.relayDir, this.project, this.requestedName);
+    this.runtimeColor = this.requestedColor && isValidHexColor(this.requestedColor)
+      ? this.requestedColor
+      : fallbackColor(this.sessionId);
+    this.endpointPath = makeEndpoint(this.relayDir, this.sessionId);
+
+    try {
+      this.server = await bindEndpoint(this.endpointPath, (socket) => {
+        void this.handleSocket(socket);
+      });
+      this.registryFile = writeRegistryAtomic(this.relayDir, this.makeRegistryEntry());
+      this.started = true;
+    } catch (error) {
+      await this.closeServer();
+      if (process.platform !== "win32") {
+        try {
+          fs.unlinkSync(this.endpointPath);
+        } catch {
+          // best effort
+        }
+      }
+      throw error;
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (!this.started && !this.server) return;
+    this.started = false;
+    await this.closeServer();
+    removeRegistryEntry(this.relayDir, this.project, this.runtimeName);
+    if (process.platform !== "win32") {
+      try {
+        fs.unlinkSync(this.endpointPath);
+      } catch {
+        // best effort
+      }
+    }
+    this.registryFile = null;
+  }
+
+  async listPeers(options: RelayListOptions = {}): Promise<PeerInfo[]> {
+    const includeExplicit = options.include_explicit === true;
+    const ping = options.ping !== false;
+    const projectFilter = options.project ?? this.project;
+    const entries = projectFilter === "*"
+      ? pruneDeadEntriesAcrossProjects(this.relayDir)
+      : pruneDeadEntries(this.relayDir, projectFilter);
+
+    const candidates = entries.filter((entry) => {
+      if (entry.session_id === this.sessionId) return false;
+      if (entry.explicit && !includeExplicit) return false;
+      return true;
+    });
+
+    if (!ping) {
+      return candidates.map((entry) => ({ ...entry, alive: true }));
+    }
+
+    const cards = await Promise.allSettled(candidates.map((entry) => this.pingPeer(entry)));
+    return candidates.map((entry, index) => {
+      const settled = cards[index];
+      const agentCard = settled?.status === "fulfilled" ? settled.value : null;
+      return {
+        ...entry,
+        alive: agentCard !== null,
+        ...(agentCard ? { agent_card: agentCard } : {}),
+      };
+    });
+  }
+
+  async sendPrompt(args: RelaySendArgs): Promise<RelaySendResult> {
+    this.assertStarted();
+    if (!args.prompt) throw new Error("relay_send requires a non-empty prompt");
+
+    const target = this.resolveTarget(args.target);
+    if (!target) {
+      throw new Error(`no live relay peer matching ${JSON.stringify(args.target)}`);
+    }
+
+    const parentMsgId = args.parent_msg_id ?? null;
+    const hops = this.computeOutgoingHops(parentMsgId);
+    const msgId = makeId("msg");
+    const sentAt = nowIso();
+
+    const record: OutboundPromptRecord = {
+      msg_id: msgId,
+      target_session: target.session_id,
+      target_name: target.name,
+      target_endpoint: target.endpoint,
+      parent_msg_id: parentMsgId,
+      conversation_id: args.conversation_id ?? null,
+      response_schema: args.response_schema ?? null,
+      hops,
+      prompt: args.prompt,
+      sent_at: sentAt,
+      status: "sent",
+    };
+    this.outbound.set(msgId, record);
+    if (parentMsgId) this.addChild(parentMsgId, msgId);
+
+    const envelope: PromptEnvelope = {
+      type: "prompt",
+      msg_id: msgId,
+      sender_session: this.sessionId,
+      sender_endpoint: this.endpointPath,
+      sender_name: this.runtimeName,
+      sender_cwd: this.cwd,
+      timestamp: sentAt,
+      prompt: args.prompt,
+      hops,
+      parent_msg_id: parentMsgId,
+      conversation_id: args.conversation_id ?? null,
+      response_schema: args.response_schema ?? null,
+    };
+
+    try {
+      await sendEnvelope(target.endpoint, envelope);
+    } catch (error) {
+      record.status = "error";
+      record.error = error instanceof Error ? error.message : String(error);
+      if (parentMsgId) this.removeChild(parentMsgId, msgId);
+      throw error;
+    }
+
+    return {
+      msg_id: msgId,
+      status: "sent",
+      target: target.name,
+      target_session: target.session_id,
+      hops,
+    };
+  }
+
+  async reply(args: RelayReplyArgs): Promise<RelayReplyResult> {
+    this.assertStarted();
+    const inbound = this.inbound.get(args.msg_id);
+    if (!inbound) throw new Error(`unknown inbound msg_id ${args.msg_id}`);
+    if (inbound.status !== "open") throw new Error(`inbound msg_id ${args.msg_id} is not open`);
+
+    const envelope: ResponseEnvelope = {
+      type: "response",
+      msg_id: inbound.msg_id,
+      sender_session: this.sessionId,
+      sender_endpoint: this.endpointPath,
+      timestamp: nowIso(),
+      response: args.response,
+      error: args.error ?? null,
+    };
+
+    await sendEnvelope(inbound.sender_endpoint, envelope);
+    inbound.status = "replied";
+    inbound.replied_at = nowIso();
+    return { msg_id: args.msg_id, status: "sent" };
+  }
+
+  getInbound(msgId: string): InboundPromptRecord | undefined {
+    return this.inbound.get(msgId);
+  }
+
+  getOutbound(msgId: string): OutboundPromptRecord | undefined {
+    return this.outbound.get(msgId);
+  }
+
+  getChildren(parentMsgId: string): string[] {
+    return [...(this.childrenByParent.get(parentMsgId) ?? [])];
+  }
+
+  private async handleSocket(socket: net.Socket): Promise<void> {
+    let msgId = "";
+    try {
+      const line = await readOneLine(socket);
+      const parsed = JSON.parse(line) as unknown;
+      msgId = extractMsgId(parsed);
+
+      if (!isRelayEnvelope(parsed)) {
+        writeNack(socket, msgId, "malformed envelope");
+        return;
+      }
+
+      if (parsed.type === "prompt") {
+        this.handlePrompt(socket, parsed);
+      } else if (parsed.type === "response") {
+        this.handleResponse(socket, parsed);
+      } else {
+        this.handlePing(socket, parsed);
+      }
+    } catch (error) {
+      writeNack(socket, msgId, error instanceof SyntaxError ? "malformed envelope" : "internal error");
+    }
+  }
+
+  private handlePrompt(socket: net.Socket, envelope: PromptEnvelope): void {
+    if (!Number.isInteger(envelope.hops) || envelope.hops < 0) {
+      writeNack(socket, envelope.msg_id, "invalid hops");
+      return;
+    }
+    if (envelope.hops >= this.maxHops) {
+      writeNack(socket, envelope.msg_id, "hops exceeded");
+      return;
+    }
+    if (this.inbound.has(envelope.msg_id)) {
+      writeNack(socket, envelope.msg_id, "duplicate msg_id");
+      return;
+    }
+
+    const record: InboundPromptRecord = {
+      msg_id: envelope.msg_id,
+      sender_session: envelope.sender_session,
+      sender_endpoint: envelope.sender_endpoint,
+      sender_name: envelope.sender_name,
+      sender_cwd: envelope.sender_cwd,
+      prompt: envelope.prompt,
+      hops: envelope.hops,
+      parent_msg_id: envelope.parent_msg_id ?? null,
+      conversation_id: envelope.conversation_id ?? null,
+      response_schema: envelope.response_schema ?? null,
+      received_at: nowIso(),
+      status: "open",
+    };
+    this.inbound.set(envelope.msg_id, record);
+
+    const event: RelayPromptEvent = {
+      ...record,
+      kind: "prompt",
+      expects_json: envelope.response_schema != null,
+    };
+
+    try {
+      this.emit("prompt", event);
+    } catch (error) {
+      this.inbound.delete(envelope.msg_id);
+      writeNack(socket, envelope.msg_id, error instanceof Error ? error.message : "prompt handler failed");
+      return;
+    }
+
+    writeAck(socket, envelope.msg_id);
+  }
+
+  private handleResponse(socket: net.Socket, envelope: ResponseEnvelope): void {
+    const outbound = this.outbound.get(envelope.msg_id);
+    const event: RelayResponseEvent = {
+      kind: "response",
+      msg_id: envelope.msg_id,
+      sender_session: envelope.sender_session,
+      sender_name: outbound?.target_name ?? envelope.sender_session,
+      response: envelope.response,
+      error: envelope.error ?? null,
+      received_at: nowIso(),
+    };
+
+    if (!outbound) {
+      try {
+        this.emit("orphan_response", event);
+      } catch {
+        // The response is already orphaned; still ACK so the remote can finish.
+      }
+      writeAck(socket, envelope.msg_id);
+      return;
+    }
+
+    outbound.status = envelope.error ? "error" : "responded";
+    outbound.response = envelope.response;
+    outbound.error = envelope.error ?? null;
+    outbound.responded_at = event.received_at;
+
+    try {
+      this.emit("response", event);
+    } catch (error) {
+      writeNack(socket, envelope.msg_id, error instanceof Error ? error.message : "response handler failed");
+      return;
+    }
+
+    writeAck(socket, envelope.msg_id);
+  }
+
+  private handlePing(socket: net.Socket, envelope: PingEnvelope): void {
+    writePong(socket, {
+      type: "pong",
+      msg_id: envelope.msg_id,
+      agent_card: this.agentCard(),
+    });
+  }
+
+  private async pingPeer(entry: RegistryEntry): Promise<AgentCard | null> {
+    if (!this.started) return null;
+    const envelope: PingEnvelope = {
+      type: "ping",
+      msg_id: makeId("ping"),
+      sender_session: this.sessionId,
+      sender_endpoint: this.endpointPath,
+      timestamp: nowIso(),
+    };
+
+    try {
+      const reply = await sendEnvelope(entry.endpoint, envelope);
+      return reply.type === "pong" ? reply.agent_card : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveTarget(target: string): RegistryEntry | null {
+    const localEntries = pruneDeadEntries(this.relayDir, this.project);
+    const localByName = localEntries.find((entry) => entry.name === target);
+    if (localByName) return localByName;
+
+    const allEntries = pruneDeadEntriesAcrossProjects(this.relayDir);
+    const bySession = allEntries.find((entry) => entry.session_id === target);
+    if (bySession) return bySession;
+
+    return allEntries.find((entry) => entry.name === target) ?? null;
+  }
+
+  private computeOutgoingHops(parentMsgId: string | null): number {
+    if (!parentMsgId) return 0;
+    const parent = this.inbound.get(parentMsgId);
+    if (!parent) throw new Error(`unknown parent_msg_id ${parentMsgId}`);
+
+    const hops = parent.hops + 1;
+    if (hops >= this.maxHops) {
+      throw new Error(`hop limit reached (${hops} >= ${this.maxHops})`);
+    }
+    return hops;
+  }
+
+  private makeRegistryEntry(): RegistryEntry {
+    return {
+      kind: "hearsay-relay-agent",
+      version: 2,
+      session_id: this.sessionId,
+      name: this.runtimeName,
+      purpose: this.purpose,
+      model: this.model,
+      color: this.runtimeColor,
+      pid: process.pid,
+      endpoint: this.endpointPath,
+      cwd: this.cwd,
+      started_at: nowIso(),
+      explicit: this.explicit,
+      project: this.project,
+      heartbeat_at: nowIso(),
+    };
+  }
+
+  private agentCard(): AgentCard {
+    return {
+      name: this.runtimeName,
+      purpose: this.purpose,
+      model: this.model,
+      color: this.runtimeColor,
+      context_used_pct: clampContextPct(this.contextUsedPct?.() ?? null),
+      queue_depth: [...this.inbound.values()].filter((record) => record.status === "open").length,
+    };
+  }
+
+  private addChild(parentMsgId: string, childMsgId: string): void {
+    const children = this.childrenByParent.get(parentMsgId) ?? new Set<string>();
+    children.add(childMsgId);
+    this.childrenByParent.set(parentMsgId, children);
+  }
+
+  private removeChild(parentMsgId: string, childMsgId: string): void {
+    const children = this.childrenByParent.get(parentMsgId);
+    if (!children) return;
+    children.delete(childMsgId);
+    if (children.size === 0) this.childrenByParent.delete(parentMsgId);
+  }
+
+  private assertStarted(): void {
+    if (!this.started) throw new Error("relay runtime is not started");
+  }
+
+  private async closeServer(): Promise<void> {
+    const server = this.server;
+    this.server = null;
+    if (!server) return;
+
+    await new Promise<void>((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+  }
+}
+
+function normalizeMaxHops(value: number | undefined): number {
+  const envValue = Number(process.env.HEARSAY_RELAY_MAX_HOPS);
+  const candidate = value ?? (Number.isFinite(envValue) && envValue > 0 ? envValue : DEFAULT_MAX_HOPS);
+  if (!Number.isInteger(candidate) || candidate < 1) {
+    throw new Error(`invalid maxHops: ${candidate}`);
+  }
+  return candidate;
+}
+
+function clampContextPct(value: number | null): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function extractMsgId(value: unknown): string {
+  if (!value || typeof value !== "object") return "";
+  const maybe = (value as { msg_id?: unknown }).msg_id;
+  return typeof maybe === "string" ? maybe : "";
+}
+
+function isRelayEnvelope(value: unknown): value is RelayEnvelope {
+  if (!value || typeof value !== "object") return false;
+  const envelope = value as Partial<RelayEnvelope>;
+  if (typeof envelope.type !== "string") return false;
+  if (typeof envelope.msg_id !== "string") return false;
+  if (typeof envelope.sender_session !== "string") return false;
+  if (typeof envelope.sender_endpoint !== "string") return false;
+  if (typeof envelope.timestamp !== "string") return false;
+
+  if (envelope.type === "prompt") {
+    const prompt = envelope as Partial<PromptEnvelope>;
+    return (
+      typeof prompt.sender_name === "string" &&
+      typeof prompt.sender_cwd === "string" &&
+      typeof prompt.prompt === "string" &&
+      typeof prompt.hops === "number"
+    );
+  }
+
+  if (envelope.type === "response") {
+    return "response" in envelope;
+  }
+
+  return envelope.type === "ping";
+}
