@@ -5,7 +5,7 @@ Async mailbox/event relay for coding agents.
 This repository currently contains:
 
 - shared Relay v2 core runtime
-- pi extension adapter exposing `relay_list`, `relay_send`, and `relay_reply`
+- pi extension adapter exposing `relay_list_peers`, `relay_send`, and `relay_reply`
 - Claude Code channel MCP server exposing the same three tools
 
 Core behavior:
@@ -51,7 +51,7 @@ pi -e ./src/pi/extension.ts \
 In either pi instance, ask the agent to list peers:
 
 ```text
-Use relay_list to show Hearsay Relay peers.
+Use relay_list_peers to show Hearsay Relay peers.
 ```
 
 From `alpha`, ask it to send a message:
@@ -137,7 +137,7 @@ If you used a different MCP server key, use that key instead, for example `serve
 In Claude, run `/mcp` and verify `hearsay-relay` is connected. Then verify it sees the Relay tools and peers:
 
 ```text
-Use relay_list to show Hearsay Relay peers.
+Use relay_list_peers to show Hearsay Relay peers.
 ```
 
 With pi peers `alpha` and `kilo` already running in project `demo`, try this from `alpha`:
@@ -175,7 +175,7 @@ claude mcp list
 - `--relay-project <project>`: discovery namespace; peers must share this to find each other by name
 - `--relay-purpose <text>`: short peer description
 - `--relay-color <#RRGGBB>`: optional display color
-- `--relay-explicit`: hide from normal `relay_list` unless `include_explicit=true`
+- `--relay-hidden`: hide from normal `relay_list_peers` unless `include_hidden=true`
 - `--relay-dir <path>`: override storage directory
 
 You can also set `HEARSAY_RELAY_DIR` to isolate a test network:

@@ -147,7 +147,7 @@ function isRegistryEntry(value: unknown): value is RegistryEntry {
     typeof entry.endpoint === "string" &&
     typeof entry.cwd === "string" &&
     typeof entry.started_at === "string" &&
-    typeof entry.explicit === "boolean" &&
+    typeof entry.hidden === "boolean" &&
     typeof entry.project === "string"
   );
 }

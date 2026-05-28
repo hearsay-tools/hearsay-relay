@@ -75,7 +75,7 @@ export interface RegistryEntry {
   endpoint: string;
   cwd: string;
   started_at: string;
-  explicit: boolean;
+  hidden: boolean;
   project: string;
   heartbeat_at?: string;
 }
@@ -125,7 +125,7 @@ export interface RelayRuntimeOptions {
   model?: string;
   color?: string;
   cwd?: string;
-  explicit?: boolean;
+  hidden?: boolean;
   relayDir?: string;
   maxHops?: number;
   contextUsedPct?: () => number | null;
@@ -133,7 +133,7 @@ export interface RelayRuntimeOptions {
 
 export interface RelayListOptions {
   project?: string;
-  include_explicit?: boolean;
+  include_hidden?: boolean;
   ping?: boolean;
 }
 

@@ -99,6 +99,19 @@ test("tracks a three-agent delegation chain", async () => {
   assert.equal(c.getInbound(sentToCharlie.msg_id)?.status, "replied");
 });
 
+test("hides hidden peers from default discovery", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo", hidden: true });
+  await Promise.all([a.start(), b.start()]);
+
+  const visiblePeers = await a.listPeers({ ping: false });
+  assert.deepEqual(visiblePeers.map((peer) => peer.name), []);
+
+  const allPeers = await a.listPeers({ ping: false, include_hidden: true });
+  assert.deepEqual(allPeers.map((peer) => peer.name), ["bravo"]);
+});
+
 test("Claude channel MCP server exposes relay tools and emits channel notifications", async () => {
   const relayDir = tempRelayDir();
   const kilo = runtime({ relayDir, name: "kilo" });
@@ -131,10 +144,10 @@ test("Claude channel MCP server exposes relay tools and emits channel notificati
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["relay_list", "relay_reply", "relay_send"],
+    ["relay_list_peers", "relay_reply", "relay_send"],
   );
 
-  const listed = await client.callTool({ name: "relay_list", arguments: {} });
+  const listed = await client.callTool({ name: "relay_list_peers", arguments: {} });
   assert.match(toolText(listed), /kilo/);
 
   const responseSeen = onceResponse(kilo);

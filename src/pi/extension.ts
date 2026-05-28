@@ -23,9 +23,9 @@ type PiContext = {
   getContextUsage?: () => { percent?: number } | undefined;
 };
 
-const relayListParams = Type.Object({
+const relayListPeersParams = Type.Object({
   project: Type.Optional(Type.String({ description: "Project name, or \"*\" for all projects. Defaults to this agent's project." })),
-  include_explicit: Type.Optional(Type.Boolean({ description: "Include peers started with --relay-explicit. Default false." })),
+  include_hidden: Type.Optional(Type.Boolean({ description: "Include peers started with --relay-hidden. Default false." })),
 });
 
 const relaySendParams = Type.Object({
@@ -63,8 +63,8 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
     type: "string",
     default: undefined,
   });
-  pi.registerFlag("relay-explicit", {
-    description: "Hide this peer from normal relay_list unless include_explicit=true.",
+  pi.registerFlag("relay-hidden", {
+    description: "Hide this peer from normal relay_list_peers unless include_hidden=true.",
     type: "boolean",
     default: false,
   });
@@ -78,16 +78,16 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
   let currentCtx: PiContext | null = null;
 
   pi.registerTool({
-    name: "relay_list",
-    label: "Relay List",
-    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_explicit=true reveals explicit peers.",
+    name: "relay_list_peers",
+    label: "List Relay Peers",
+    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_hidden=true reveals hidden peers.",
     promptSnippet: "List Hearsay Relay peer agents available for async messages.",
-    parameters: relayListParams,
-    async execute(_toolCallId: string, params: { project?: string; include_explicit?: boolean }) {
+    parameters: relayListPeersParams,
+    async execute(_toolCallId: string, params: { project?: string; include_hidden?: boolean }) {
       const relay = requireRuntime(runtime);
       const peers = await relay.listPeers({
         project: params.project,
-        include_explicit: params.include_explicit,
+        include_hidden: params.include_hidden,
         ping: true,
       });
 
@@ -100,7 +100,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
 
   pi.registerTool({
     name: "relay_send",
-    label: "Relay Send",
+    label: "Send Relay Message",
     description: "Send an async Hearsay Relay message to a peer. Returns after receiver ACK with {msg_id,status:\"sent\"}; it does not wait for the final response.",
     promptSnippet: "Send an async Hearsay Relay message to another peer; response arrives later as an injected Relay event.",
     promptGuidelines: [
@@ -142,7 +142,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
 
   pi.registerTool({
     name: "relay_reply",
-    label: "Relay Reply",
+    label: "Reply to Relay Prompt",
     description: "Explicitly reply to an inbound Hearsay Relay prompt by msg_id.",
     promptSnippet: "Reply explicitly to an inbound Hearsay Relay prompt using its msg_id.",
     promptGuidelines: [
@@ -197,7 +197,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
     const purpose = getStringFlag(pi, "relay-purpose") ?? process.env.HEARSAY_RELAY_PURPOSE ?? "";
     const color = getStringFlag(pi, "relay-color") ?? process.env.HEARSAY_RELAY_COLOR;
     const relayDir = getStringFlag(pi, "relay-dir") ?? process.env.HEARSAY_RELAY_DIR;
-    const explicit = getBooleanFlag(pi, "relay-explicit") || process.env.HEARSAY_RELAY_EXPLICIT === "1";
+    const hidden = getBooleanFlag(pi, "relay-hidden") || process.env.HEARSAY_RELAY_HIDDEN === "1";
 
     const nextRuntime = new RelayRuntime({
       name,
@@ -205,7 +205,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       purpose,
       color,
       relayDir,
-      explicit,
+      hidden,
       cwd: ctx.cwd ?? process.cwd(),
       model: ctx.model?.id ?? "unknown",
       contextUsedPct: () => ctx.getContextUsage?.()?.percent ?? null,

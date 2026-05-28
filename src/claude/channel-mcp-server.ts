@@ -13,7 +13,7 @@ interface CliOptions {
   color?: string;
   cwd: string;
   relayDir?: string;
-  explicit: boolean;
+  hidden: boolean;
   maxHops?: number;
 }
 
@@ -34,7 +34,7 @@ const runtime = new RelayRuntime({
   color: options.color,
   cwd: options.cwd,
   relayDir: options.relayDir,
-  explicit: options.explicit,
+  hidden: options.hidden,
   maxHops: options.maxHops,
 });
 
@@ -49,7 +49,7 @@ const server = new McpServer(
     },
     instructions: [
       "Hearsay Relay is an asynchronous mailbox/event relay between agents.",
-      "Use relay_list to discover peers, relay_send to send async messages, and relay_reply to explicitly answer inbound Relay prompts.",
+      "Use relay_list_peers to discover peers, relay_send to send async messages, and relay_reply to explicitly answer inbound Relay prompts.",
       "relay_send returns after receiver ACK only; do not poll or wait for a response tool. Responses arrive later as Claude channel notifications.",
       "When delegating work caused by an inbound Relay prompt, pass that inbound prompt's msg_id as relay_send parent_msg_id.",
       "Every inbound Relay prompt should be answered exactly once with relay_reply when ready.",
@@ -76,19 +76,19 @@ server.server.onclose = () => {
 };
 
 server.registerTool(
-  "relay_list",
+  "relay_list_peers",
   {
-    title: "Relay List",
-    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_explicit=true reveals explicit peers.",
+    title: "List Relay Peers",
+    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_hidden=true reveals hidden peers.",
     inputSchema: {
       project: z.string().optional().describe("Project name, or '*' for all projects. Defaults to this Claude peer's project."),
-      include_explicit: z.boolean().optional().describe("Include peers started as explicit/hidden. Default false."),
+      include_hidden: z.boolean().optional().describe("Include peers started as hidden. Default false."),
     },
   },
-  async ({ project, include_explicit }) => {
+  async ({ project, include_hidden }) => {
     const peers = await runtime.listPeers({
       project,
-      include_explicit,
+      include_hidden,
       ping: true,
     });
 
@@ -102,7 +102,7 @@ server.registerTool(
 server.registerTool(
   "relay_send",
   {
-    title: "Relay Send",
+    title: "Send Relay Message",
     description: "Send an async Hearsay Relay message to a peer. Returns after receiver ACK with {msg_id,status:'sent'}; it does not wait for the final response.",
     inputSchema: {
       target: z.string().describe("Peer name, or session_id."),
@@ -140,7 +140,7 @@ server.registerTool(
 server.registerTool(
   "relay_reply",
   {
-    title: "Relay Reply",
+    title: "Reply to Relay Prompt",
     description: "Explicitly reply to an inbound Hearsay Relay prompt by msg_id.",
     inputSchema: {
       msg_id: z.string().describe("Inbound prompt msg_id being answered."),
@@ -352,7 +352,7 @@ function parseCliOptions(args: string[]): CliOptions {
     const key = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
     const inlineValue = eq >= 0 ? arg.slice(eq + 1) : undefined;
 
-    if (["explicit", "relay-explicit"].includes(key)) {
+    if (["hidden", "relay-hidden"].includes(key)) {
       booleans.add(key);
       continue;
     }
@@ -383,7 +383,7 @@ function parseCliOptions(args: string[]): CliOptions {
     color: getLast(values, "color") ?? getLast(values, "relay-color") ?? process.env.HEARSAY_RELAY_COLOR,
     cwd,
     relayDir: getLast(values, "dir") ?? getLast(values, "relay-dir") ?? process.env.HEARSAY_RELAY_DIR,
-    explicit: booleans.has("explicit") || booleans.has("relay-explicit") || process.env.HEARSAY_RELAY_EXPLICIT === "1",
+    hidden: booleans.has("hidden") || booleans.has("relay-hidden") || process.env.HEARSAY_RELAY_HIDDEN === "1",
     maxHops,
   };
 }
@@ -394,7 +394,7 @@ function getLast(values: Map<string, string[]>, key: string): string | undefined
 }
 
 function printHelpAndExit(): never {
-  console.error(`Hearsay Relay Claude Code channel MCP server\n\nUsage:\n  hearsay-relay-claude [options]\n\nOptions:\n  --name, --relay-name <name>         Relay peer name (default: charlie)\n  --project, --relay-project <name>   Relay project namespace (default: default)\n  --purpose, --relay-purpose <text>   Peer purpose (default: Claude Code Relay peer)\n  --model <name>                      Peer model label (default: claude-code)\n  --color, --relay-color <#RRGGBB>    Optional peer color\n  --dir, --relay-dir <path>           Relay storage dir (default: HEARSAY_RELAY_DIR or ~/.hearsay/relay)\n  --cwd <path>                        Peer cwd label (default: process cwd)\n  --explicit, --relay-explicit        Hide from normal relay_list unless include_explicit=true\n  --max-hops <n>                      Max prompt delegation hops\n`);
+  console.error(`Hearsay Relay Claude Code channel MCP server\n\nUsage:\n  hearsay-relay-claude [options]\n\nOptions:\n  --name, --relay-name <name>         Relay peer name (default: charlie)\n  --project, --relay-project <name>   Relay project namespace (default: default)\n  --purpose, --relay-purpose <text>   Peer purpose (default: Claude Code Relay peer)\n  --model <name>                      Peer model label (default: claude-code)\n  --color, --relay-color <#RRGGBB>    Optional peer color\n  --dir, --relay-dir <path>           Relay storage dir (default: HEARSAY_RELAY_DIR or ~/.hearsay/relay)\n  --cwd <path>                        Peer cwd label (default: process cwd)\n  --hidden, --relay-hidden            Hide from normal relay_list_peers unless include_hidden=true\n  --max-hops <n>                      Max prompt delegation hops\n`);
   process.exit(0);
 }
 

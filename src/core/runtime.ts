@@ -43,7 +43,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
   readonly purpose: string;
   readonly model: string;
   readonly cwd: string;
-  readonly explicit: boolean;
+  readonly hidden: boolean;
   readonly maxHops: number;
 
   private readonly requestedName: string;
@@ -68,7 +68,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     this.purpose = options.purpose ?? "";
     this.model = options.model ?? "unknown";
     this.cwd = options.cwd ?? process.cwd();
-    this.explicit = options.explicit === true;
+    this.hidden = options.hidden === true;
     this.maxHops = normalizeMaxHops(options.maxHops);
     this.requestedName = options.name ?? `agent-${this.sessionId.slice(-6)}`;
     this.requestedColor = options.color;
@@ -140,7 +140,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
   }
 
   async listPeers(options: RelayListOptions = {}): Promise<PeerInfo[]> {
-    const includeExplicit = options.include_explicit === true;
+    const includeHidden = options.include_hidden === true;
     const ping = options.ping !== false;
     const projectFilter = options.project ?? this.project;
     const entries = projectFilter === "*"
@@ -149,7 +149,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
 
     const candidates = entries.filter((entry) => {
       if (entry.session_id === this.sessionId) return false;
-      if (entry.explicit && !includeExplicit) return false;
+      if (entry.hidden && !includeHidden) return false;
       return true;
     });
 
@@ -437,7 +437,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       endpoint: this.endpointPath,
       cwd: this.cwd,
       started_at: nowIso(),
-      explicit: this.explicit,
+      hidden: this.hidden,
       project: this.project,
       heartbeat_at: nowIso(),
     };
