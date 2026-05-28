@@ -17,6 +17,11 @@ Core behavior:
 - runtime-computed hop counts from `parent_msg_id`
 - no public polling/await transport API
 
+## Architecture
+
+See [docs/architecture.md](docs/architecture.md) for the current protocol,
+runtime, adapter, and deferred-item architecture.
+
 ## Development
 
 ```sh
@@ -70,7 +75,7 @@ Add a third terminal:
 
 ```sh
 pi -e ./src/pi/extension.ts \
-  --relay-name charlie \
+  --relay-name kilo \
   --relay-project demo \
   --relay-purpose "Specialist"
 ```
@@ -78,22 +83,22 @@ pi -e ./src/pi/extension.ts \
 In `alpha`, ask:
 
 ```text
-Use relay_send to ask bravo: "Delegate one small subquestion to charlie using relay_send with parent_msg_id set to your inbound Relay msg_id. After charlie replies, summarize charlie's answer and call relay_reply back to alpha."
+Use relay_send to ask bravo: "Delegate one small subquestion to kilo using relay_send with parent_msg_id set to your inbound Relay msg_id. After kilo replies, summarize kilo's answer and call relay_reply back to alpha."
 ```
 
 Expected chain:
 
 ```text
 alpha --relay_send(hops=0)--> bravo
-bravo --relay_send(parent_msg_id=<alpha msg>, hops=1)--> charlie
-charlie --relay_reply(child msg)--> bravo
+bravo --relay_send(parent_msg_id=<alpha msg>, hops=1)--> kilo
+kilo --relay_reply(child msg)--> bravo
 bravo --relay_reply(alpha msg)--> alpha
 ```
 
 What to check:
 
 - `bravo`'s inbound prompt shows `hops: 0`.
-- `charlie`'s inbound prompt shows `hops: 1` and `parent_msg_id` equal to the alpha→bravo `msg_id`.
+- `kilo`'s inbound prompt shows `hops: 1` and `parent_msg_id` equal to the alpha→bravo `msg_id`.
 - `alpha` receives only the final response from `bravo`.
 - No agent uses polling; all wakes are injected Relay events.
 
@@ -105,11 +110,12 @@ Build the TypeScript first:
 npm run build
 ```
 
-Register the Claude Code MCP server from the project where you want to run Claude. For a project-local MCP config:
+Register the Claude Code MCP server from the project where you want to run Claude. For a project-local MCP config, set `HEARSAY_RELAY_REPO` to this repository's absolute path:
 
 ```sh
+HEARSAY_RELAY_REPO=/path/to/hearsay-relay
 claude mcp add -s local hearsay-relay -- \
-  node /Users/wjarka/code/agent-coms/dist/src/claude/channel-mcp-server.js \
+  node "$HEARSAY_RELAY_REPO/dist/src/claude/channel-mcp-server.js" \
   --name charlie \
   --project demo \
   --purpose "Claude Code Relay peer"
@@ -118,9 +124,10 @@ claude mcp add -s local hearsay-relay -- \
 Or run directly from source with the local `tsx` dependency:
 
 ```sh
+HEARSAY_RELAY_REPO=/path/to/hearsay-relay
 claude mcp add -s local hearsay-relay -- \
-  node /Users/wjarka/code/agent-coms/node_modules/tsx/dist/cli.mjs \
-  /Users/wjarka/code/agent-coms/src/claude/channel-mcp-server.ts \
+  node "$HEARSAY_RELAY_REPO/node_modules/tsx/dist/cli.mjs" \
+  "$HEARSAY_RELAY_REPO/src/claude/channel-mcp-server.ts" \
   --name charlie \
   --project demo \
   --purpose "Claude Code Relay peer"
@@ -140,7 +147,7 @@ In Claude, run `/mcp` and verify `hearsay-relay` is connected. Then verify it se
 Use relay_list_peers to show Hearsay Relay peers.
 ```
 
-With pi peers `alpha` and `kilo` already running in project `demo`, try this from `alpha`:
+With pi peers `alpha` and `kilo` already running in project `demo`, add Claude Code as `charlie`, then try this from `alpha`:
 
 ```text
 Use relay_send to ask charlie: "Ask kilo one small subquestion using relay_send with parent_msg_id set to your inbound Relay msg_id. After kilo replies, summarize kilo's answer and call relay_reply back to alpha."
