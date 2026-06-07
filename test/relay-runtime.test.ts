@@ -491,6 +491,69 @@ test("pi peers use HEARSAY_RELAY_PROJECT as their default discovery namespace", 
   }
 });
 
+test("pi adapter exposes relay_followup and injects followups as steering messages", async () => {
+  const relayDir = tempRelayDir();
+  const sameCwd = path.join(relayDir, "workspace");
+  const peers: FakePi[] = [];
+  const envKeys = ["HEARSAY_RELAY_DIR", "HEARSAY_RELAY_NAME", "HEARSAY_RELAY_PROJECT"] as const;
+  const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+
+  async function startPiPeer(name: string): Promise<FakePi> {
+    process.env.HEARSAY_RELAY_DIR = relayDir;
+    process.env.HEARSAY_RELAY_NAME = name;
+    process.env.HEARSAY_RELAY_PROJECT = "project-followup";
+
+    const pi = new FakePi();
+    hearsayRelayPiExtension(pi);
+    await pi.emit("session_start", {}, { cwd: sameCwd, model: { id: "test-model" } });
+    peers.push(pi);
+    return pi;
+  }
+
+  try {
+    const alpha = await startPiPeer("alpha");
+    const bravo = await startPiPeer("bravo");
+
+    assert.deepEqual(alpha.toolNames(), [
+      "relay_followup",
+      "relay_list_peers",
+      "relay_reply",
+      "relay_send",
+    ]);
+
+    const sent = await alpha.callTool("relay_send", {
+      target: "bravo",
+      prompt: "start work",
+      conversation_id: "conv-pi",
+    });
+    const sentDetails = sent.details as { msg_id: string };
+
+    await alpha.callTool("relay_followup", {
+      target: "bravo",
+      parent_msg_id: sentDetails.msg_id,
+      message: "Please steer at the next tool boundary.",
+    });
+
+    const followupMessage = bravo.messages.find((entry) => {
+      return typeof entry.message.content === "string" && entry.message.content.includes("kind: followup");
+    });
+    assert.ok(followupMessage);
+    assert.deepEqual(followupMessage.options, { deliverAs: "steer", triggerTurn: true });
+    assert.match(String(followupMessage.message.content), /No relay_reply is required for this follow-up/);
+    assert.match(String(followupMessage.message.content), /parent_msg_id:/);
+    assert.equal((followupMessage.message.details as { kind: string }).kind, "followup");
+  } finally {
+    await Promise.allSettled(peers.map((peer) => peer.emit("session_shutdown")));
+    for (const [key, value] of previousEnv) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+});
+
 test("Claude channel MCP server exposes relay tools and emits channel notifications", async () => {
   const relayDir = tempRelayDir();
   const kilo = runtime({ relayDir, name: "kilo" });
@@ -669,6 +732,7 @@ class FakePi {
   private readonly flags = new Map<string, unknown>();
   private readonly handlers = new Map<string, Array<(...args: any[]) => unknown>>();
   private readonly tools = new Map<string, Record<string, any>>();
+  readonly messages: Array<{ message: Record<string, unknown>; options?: Record<string, unknown> }> = [];
 
   registerFlag(name: string, options: Record<string, unknown>): void {
     this.flags.set(name, options.default);
@@ -682,6 +746,10 @@ class FakePi {
     this.tools.set(String(definition.name), definition);
   }
 
+  toolNames(): string[] {
+    return [...this.tools.keys()].sort();
+  }
+
   registerCommand(_name: string, _definition: Record<string, unknown>): void {
     // Not needed by these tests.
   }
@@ -692,8 +760,8 @@ class FakePi {
     this.handlers.set(event, handlers);
   }
 
-  sendMessage(_message: Record<string, unknown>, _options?: Record<string, unknown>): void {
-    // Not needed by these tests.
+  sendMessage(message: Record<string, unknown>, options?: Record<string, unknown>): void {
+    this.messages.push({ message, options });
   }
 
   appendEntry(_customType: string, _data?: unknown): void {

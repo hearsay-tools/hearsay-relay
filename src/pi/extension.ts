@@ -1,6 +1,6 @@
 import { Type } from "@sinclair/typebox";
 import { RelayRuntime } from "../core/runtime.js";
-import type { PeerInfo, RelayPromptEvent, RelayResponseEvent } from "../core/types.js";
+import type { PeerInfo, RelayFollowupEvent, RelayPromptEvent, RelayResponseEvent } from "../core/types.js";
 
 type PiApi = {
   registerFlag: (name: string, options: Record<string, unknown>) => void;
@@ -34,6 +34,12 @@ const relaySendParams = Type.Object({
   parent_msg_id: Type.Optional(Type.String({ description: "Inbound Relay msg_id this send delegates from. The runtime uses this to compute hops." })),
   conversation_id: Type.Optional(Type.String({ description: "Optional conversation/thread correlation id." })),
   response_schema: Type.Optional(Type.Any({ description: "Optional JSON schema describing the expected response." })),
+});
+
+const relayFollowupParams = Type.Object({
+  target: Type.String({ description: "Peer name, or session_id. Must match the original relay_send target." }),
+  parent_msg_id: Type.String({ description: "Outbound Relay msg_id from the original relay_send being steered." }),
+  message: Type.String({ description: "Follow-up steering/context message. No reply is required for this follow-up." }),
 });
 
 const relayReplyParams = Type.Object({
@@ -141,6 +147,42 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
   });
 
   pi.registerTool({
+    name: "relay_followup",
+    label: "Send Relay Follow-Up",
+    description: "Send follow-up steering/context for an existing Relay request. Requires parent_msg_id from an earlier relay_send and does not create a reply obligation.",
+    promptSnippet: "Send a Relay follow-up for an existing request; no response will arrive for the follow-up.",
+    promptGuidelines: [
+      "Use relay_followup to steer or add context to an existing relay_send without asking the peer to reply twice.",
+      "Pass the original relay_send msg_id as parent_msg_id. The target must be the same peer as the original send.",
+      "Do not call relay_reply for inbound follow-up events; reply only to the original Relay prompt when ready.",
+    ],
+    parameters: relayFollowupParams,
+    async execute(_toolCallId: string, params: { target: string; parent_msg_id: string; message: string }) {
+      const relay = requireRuntime(runtime);
+      const result = await relay.followup({
+        target: params.target,
+        parent_msg_id: params.parent_msg_id,
+        message: params.message,
+      });
+
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `relay_followup → ${result.target}`,
+            `msg_id: ${result.msg_id}`,
+            `parent_msg_id: ${result.parent_msg_id}`,
+            `status: ${result.status}`,
+            `hops: ${result.hops}`,
+            "No response event will be injected for this follow-up.",
+          ].join("\n"),
+        }],
+        details: result,
+      };
+    },
+  });
+
+  pi.registerTool({
     name: "relay_reply",
     label: "Reply to Relay Prompt",
     description: "Explicitly reply to an inbound Hearsay Relay prompt by msg_id.",
@@ -214,6 +256,9 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
     nextRuntime.on("prompt", (event) => {
       injectPrompt(pi, currentCtx, event);
     });
+    nextRuntime.on("followup", (event) => {
+      injectFollowup(pi, currentCtx, event);
+    });
     nextRuntime.on("response", (event) => {
       injectResponse(pi, currentCtx, event, false);
     });
@@ -276,6 +321,27 @@ function injectPrompt(pi: PiApi, ctx: PiContext | null, event: RelayPromptEvent)
   });
 }
 
+function injectFollowup(pi: PiApi, ctx: PiContext | null, event: RelayFollowupEvent): void {
+  if (!ctx) throw new Error("pi context unavailable");
+
+  pi.sendMessage({
+    customType: "hearsay-relay",
+    content: formatFollowupEvent(event),
+    display: true,
+    details: event,
+  }, { deliverAs: "steer", triggerTurn: true });
+
+  ctx.ui?.notify?.(`Relay follow-up from ${event.sender_name}: ${event.parent_msg_id}`, "info");
+  pi.appendEntry?.("hearsay-relay-log", {
+    event: "inbound_followup",
+    msg_id: event.msg_id,
+    parent_msg_id: event.parent_msg_id,
+    sender_name: event.sender_name,
+    sender_session: event.sender_session,
+    hops: event.hops,
+  });
+}
+
 function injectResponse(pi: PiApi, ctx: PiContext | null, event: RelayResponseEvent, orphan: boolean): void {
   try {
     pi.sendMessage({
@@ -315,6 +381,24 @@ function formatPromptEvent(event: RelayPromptEvent): string {
     "",
     `When ready, answer this Relay prompt by calling relay_reply with msg_id=${event.msg_id}.`,
     `If you delegate work caused by this prompt, call relay_send with parent_msg_id=${event.msg_id}.`,
+  ].join("\n");
+}
+
+function formatFollowupEvent(event: RelayFollowupEvent): string {
+  return [
+    "[Hearsay Relay follow-up]",
+    `kind: followup`,
+    `msg_id: ${event.msg_id}`,
+    `parent_msg_id: ${event.parent_msg_id}`,
+    `from: ${event.sender_name} (${event.sender_session})`,
+    `sender_cwd: ${event.sender_cwd}`,
+    `hops: ${event.hops}`,
+    `conversation_id: ${event.conversation_id ?? ""}`,
+    "",
+    event.message,
+    "",
+    "This is steering/context for an existing Relay prompt. No relay_reply is required for this follow-up.",
+    "Continue working on the original prompt and reply to that prompt when ready.",
   ].join("\n");
 }
 
