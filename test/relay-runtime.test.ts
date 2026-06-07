@@ -5,7 +5,14 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { RelayRuntime, sendEnvelope, type RelayPromptEvent, type RelayResponseEvent } from "../src/core/index.js";
+import {
+  RelayRuntime,
+  sendEnvelope,
+  type FollowupEnvelope,
+  type RelayFollowupEvent,
+  type RelayPromptEvent,
+  type RelayResponseEvent,
+} from "../src/core/index.js";
 import hearsayRelayPiExtension from "../src/pi/extension.js";
 
 const cleanupDirs: string[] = [];
@@ -49,6 +56,237 @@ test("sends prompt asynchronously and delivers explicit reply", async () => {
   assert.equal(response.response, "world");
   assert.equal(a.getOutbound(sent.msg_id)?.status, "responded");
   assert.equal(b.getInbound(sent.msg_id)?.status, "replied");
+});
+
+test("delivers followup without creating reply obligation", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const followupSeen = onceFollowup(b);
+  const responseSeen = onceResponse(a);
+
+  const sent = await a.sendPrompt({
+    target: "bravo",
+    prompt: "start work",
+    conversation_id: "conv-followup",
+  });
+  const prompt = await promptSeen;
+
+  const followed = await a.followup({
+    target: "bravo",
+    parent_msg_id: sent.msg_id,
+    message: "Please prioritize the simple implementation.",
+  });
+
+  assert.equal(followed.status, "sent");
+  assert.equal(followed.target, "bravo");
+  assert.notEqual(followed.msg_id, sent.msg_id);
+
+  const followup = await followupSeen;
+  assert.equal(followup.kind, "followup");
+  assert.equal(followup.msg_id, followed.msg_id);
+  assert.equal(followup.parent_msg_id, sent.msg_id);
+  assert.equal(followup.sender_name, "alpha");
+  assert.equal(followup.message, "Please prioritize the simple implementation.");
+  assert.equal(followup.hops, 0);
+  assert.equal(followup.conversation_id, "conv-followup");
+  assert.equal(typeof followup.received_at, "string");
+
+  assert.equal(b.getInbound(followed.msg_id), undefined);
+  await assert.rejects(
+    b.reply({ msg_id: followed.msg_id, response: "not a prompt" }),
+    /unknown inbound msg_id/,
+  );
+
+  await b.reply({ msg_id: prompt.msg_id, response: "done" });
+  const response = await responseSeen;
+  assert.equal(response.response, "done");
+  assert.equal(a.getOutbound(sent.msg_id)?.status, "responded");
+});
+
+test("rejects relay_followup when parent_msg_id is unknown", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  await assert.rejects(
+    a.followup({ target: "bravo", parent_msg_id: "missing", message: "steer" }),
+    /unknown parent_msg_id missing/,
+  );
+});
+
+test("rejects relay_followup when message is empty", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const sent = await a.sendPrompt({ target: "bravo", prompt: "root" });
+  await promptSeen;
+
+  await assert.rejects(
+    a.followup({ target: "bravo", parent_msg_id: sent.msg_id, message: "   " }),
+    /relay_followup requires a non-empty message/,
+  );
+});
+
+test("rejects relay_followup when target does not match parent outbound prompt", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  const c = runtime({ relayDir, name: "charlie" });
+  await Promise.all([a.start(), b.start(), c.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const sent = await a.sendPrompt({ target: "bravo", prompt: "root" });
+  await promptSeen;
+
+  await assert.rejects(
+    a.followup({ target: "charlie", parent_msg_id: sent.msg_id, message: "wrong target" }),
+    /target charlie does not match parent_msg_id .* target bravo/,
+  );
+});
+
+test("rejects relay_followup after parent outbound prompt closes", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const responseSeen = onceResponse(a);
+  const sent = await a.sendPrompt({ target: "bravo", prompt: "root" });
+  const prompt = await promptSeen;
+
+  await b.reply({ msg_id: prompt.msg_id, response: "closed" });
+  await responseSeen;
+
+  await assert.rejects(
+    a.followup({ target: "bravo", parent_msg_id: sent.msg_id, message: "too late" }),
+    /parent_msg_id .* is not open/,
+  );
+});
+
+test("relay_followup preserves parent outbound hops and conversation id", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  const c = runtime({ relayDir, name: "charlie" });
+  await Promise.all([a.start(), b.start(), c.start()]);
+
+  const bravoPromptSeen = oncePrompt(b);
+  await a.sendPrompt({ target: "bravo", prompt: "root" });
+  const bravoPrompt = await bravoPromptSeen;
+
+  const charliePromptSeen = oncePrompt(c);
+  const sentToCharlie = await b.sendPrompt({
+    target: "charlie",
+    prompt: "child",
+    parent_msg_id: bravoPrompt.msg_id,
+    conversation_id: "conv-child",
+  });
+  await charliePromptSeen;
+
+  const followupSeen = onceFollowup(c);
+  await b.followup({
+    target: "charlie",
+    parent_msg_id: sentToCharlie.msg_id,
+    message: "child steering",
+  });
+
+  const followup = await followupSeen;
+  assert.equal(followup.parent_msg_id, sentToCharlie.msg_id);
+  assert.equal(followup.hops, 1);
+  assert.equal(followup.conversation_id, "conv-child");
+});
+
+test("NACKs duplicate followup envelopes", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const sent = await a.sendPrompt({ target: "bravo", prompt: "root", conversation_id: "conv-dup" });
+  await promptSeen;
+
+  const followupSeen = onceFollowup(b);
+  const envelope: FollowupEnvelope = {
+    type: "followup",
+    msg_id: "fixed-followup",
+    sender_session: a.sessionId,
+    sender_endpoint: a.endpoint,
+    sender_name: a.name,
+    sender_cwd: a.cwd,
+    timestamp: new Date().toISOString(),
+    parent_msg_id: sent.msg_id,
+    message: "same followup",
+    hops: sent.hops,
+    conversation_id: "conv-dup",
+  };
+
+  await sendEnvelope(b.endpoint, envelope);
+  const first = await followupSeen;
+  assert.equal(first.msg_id, "fixed-followup");
+
+  await assert.rejects(
+    sendEnvelope(b.endpoint, envelope),
+    /duplicate msg_id/,
+  );
+});
+
+test("NACKs malformed followup envelopes", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  await assert.rejects(
+    sendEnvelope(b.endpoint, {
+      type: "followup",
+      msg_id: "bad-followup",
+      sender_session: a.sessionId,
+      sender_endpoint: a.endpoint,
+      timestamp: new Date().toISOString(),
+      parent_msg_id: "missing-parent",
+      message: "malformed because sender identity is incomplete",
+      hops: 0,
+    }),
+    /malformed envelope/,
+  );
+});
+
+test("accepts followup when recipient no longer has parent prompt in memory", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const followupSeen = onceFollowup(b);
+  const envelope: FollowupEnvelope = {
+    type: "followup",
+    msg_id: "orphan-parent-followup",
+    sender_session: a.sessionId,
+    sender_endpoint: a.endpoint,
+    sender_name: a.name,
+    sender_cwd: a.cwd,
+    timestamp: new Date().toISOString(),
+    parent_msg_id: "parent-not-in-memory",
+    message: "still deliver this steering event",
+    hops: 0,
+    conversation_id: null,
+  };
+
+  await sendEnvelope(b.endpoint, envelope);
+  const followup = await followupSeen;
+  assert.equal(followup.msg_id, "orphan-parent-followup");
+  assert.equal(followup.parent_msg_id, "parent-not-in-memory");
+  assert.equal(followup.message, "still deliver this steering event");
 });
 
 test("tracks a three-agent delegation chain", async () => {
@@ -322,6 +560,10 @@ function oncePrompt(runtime: RelayRuntime): Promise<RelayPromptEvent> {
 
 function onceResponse(runtime: RelayRuntime): Promise<RelayResponseEvent> {
   return new Promise((resolve) => runtime.once("response", resolve));
+}
+
+function onceFollowup(runtime: RelayRuntime): Promise<RelayFollowupEvent> {
+  return new Promise((resolve) => runtime.once("followup", resolve));
 }
 
 class FakePi {
