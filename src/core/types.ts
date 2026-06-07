@@ -1,4 +1,4 @@
-export type EnvelopeType = "prompt" | "response" | "ping";
+export type EnvelopeType = "prompt" | "response" | "ping" | "followup";
 
 export interface PromptEnvelope {
   type: "prompt";
@@ -13,6 +13,20 @@ export interface PromptEnvelope {
   parent_msg_id?: string | null;
   conversation_id?: string | null;
   response_schema?: unknown | null;
+}
+
+export interface FollowupEnvelope {
+  type: "followup";
+  msg_id: string;
+  sender_session: string;
+  sender_endpoint: string;
+  sender_name: string;
+  sender_cwd: string;
+  timestamp: string;
+  parent_msg_id: string;
+  message: string;
+  hops: number;
+  conversation_id?: string | null;
 }
 
 export interface ResponseEnvelope {
@@ -33,7 +47,7 @@ export interface PingEnvelope {
   timestamp: string;
 }
 
-export type RelayEnvelope = PromptEnvelope | ResponseEnvelope | PingEnvelope;
+export type RelayEnvelope = PromptEnvelope | ResponseEnvelope | PingEnvelope | FollowupEnvelope;
 
 export interface AckEnvelope {
   type: "ack";
@@ -153,6 +167,21 @@ export interface RelaySendResult {
   hops: number;
 }
 
+export interface RelayFollowupArgs {
+  target: string;
+  parent_msg_id: string;
+  message: string;
+}
+
+export interface RelayFollowupResult {
+  msg_id: string;
+  status: "sent";
+  target: string;
+  target_session: string;
+  parent_msg_id: string;
+  hops: number;
+}
+
 export interface RelayReplyArgs {
   msg_id: string;
   response: unknown;
@@ -170,6 +199,20 @@ export interface RelayPromptEvent extends InboundPromptRecord {
   expects_json: boolean;
 }
 
+export interface RelayFollowupEvent {
+  kind: "followup";
+  msg_id: string;
+  sender_session: string;
+  sender_endpoint: string;
+  sender_name: string;
+  sender_cwd: string;
+  parent_msg_id: string;
+  message: string;
+  hops: number;
+  conversation_id?: string | null;
+  received_at: string;
+}
+
 export interface RelayResponseEvent {
   kind: "response";
   msg_id: string;
@@ -182,6 +225,7 @@ export interface RelayResponseEvent {
 
 export interface RelayRuntimeEvents {
   prompt: [RelayPromptEvent];
+  followup: [RelayFollowupEvent];
   response: [RelayResponseEvent];
   orphan_response: [RelayResponseEvent];
 }

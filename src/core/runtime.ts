@@ -15,6 +15,7 @@ import {
 import { bindEndpoint, readOneLine, sendEnvelope, writeAck, writeNack, writePong } from "./transport.js";
 import type {
   AgentCard,
+  FollowupEnvelope,
   InboundPromptRecord,
   OutboundPromptRecord,
   PeerInfo,
@@ -22,6 +23,9 @@ import type {
   PromptEnvelope,
   RegistryEntry,
   RelayEnvelope,
+  RelayFollowupArgs,
+  RelayFollowupEvent,
+  RelayFollowupResult,
   RelayListOptions,
   RelayPromptEvent,
   RelayReplyArgs,
@@ -58,6 +62,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
 
   private readonly inbound = new Map<string, InboundPromptRecord>();
   private readonly outbound = new Map<string, OutboundPromptRecord>();
+  private readonly followups = new Set<string>();
   private readonly childrenByParent = new Map<string, Set<string>>();
 
   constructor(options: RelayRuntimeOptions = {}) {
@@ -232,6 +237,49 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     };
   }
 
+  async followup(args: RelayFollowupArgs): Promise<RelayFollowupResult> {
+    this.assertStarted();
+    if (args.message.trim().length === 0) {
+      throw new Error("relay_followup requires a non-empty message");
+    }
+
+    const parent = this.outbound.get(args.parent_msg_id);
+    if (!parent) throw new Error(`unknown parent_msg_id ${args.parent_msg_id}`);
+    if (parent.status !== "sent") {
+      throw new Error(`parent_msg_id ${args.parent_msg_id} is not open`);
+    }
+    if (args.target !== parent.target_name && args.target !== parent.target_session) {
+      throw new Error(`target ${args.target} does not match parent_msg_id ${args.parent_msg_id} target ${parent.target_name}`);
+    }
+
+    const msgId = makeId("msg");
+    const sentAt = nowIso();
+    const envelope: FollowupEnvelope = {
+      type: "followup",
+      msg_id: msgId,
+      sender_session: this.sessionId,
+      sender_endpoint: this.endpointPath,
+      sender_name: this.runtimeName,
+      sender_cwd: this.cwd,
+      timestamp: sentAt,
+      parent_msg_id: parent.msg_id,
+      message: args.message,
+      hops: parent.hops,
+      conversation_id: parent.conversation_id ?? null,
+    };
+
+    await sendEnvelope(parent.target_endpoint, envelope);
+
+    return {
+      msg_id: msgId,
+      status: "sent",
+      target: parent.target_name,
+      target_session: parent.target_session,
+      parent_msg_id: parent.msg_id,
+      hops: parent.hops,
+    };
+  }
+
   async reply(args: RelayReplyArgs): Promise<RelayReplyResult> {
     this.assertStarted();
     const inbound = this.inbound.get(args.msg_id);
@@ -280,6 +328,8 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
 
       if (parsed.type === "prompt") {
         this.handlePrompt(socket, parsed);
+      } else if (parsed.type === "followup") {
+        this.handleFollowup(socket, parsed);
       } else if (parsed.type === "response") {
         this.handleResponse(socket, parsed);
       } else {
@@ -331,6 +381,47 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     } catch (error) {
       this.inbound.delete(envelope.msg_id);
       writeNack(socket, envelope.msg_id, error instanceof Error ? error.message : "prompt handler failed");
+      return;
+    }
+
+    writeAck(socket, envelope.msg_id);
+  }
+
+  private handleFollowup(socket: net.Socket, envelope: FollowupEnvelope): void {
+    if (!Number.isInteger(envelope.hops) || envelope.hops < 0) {
+      writeNack(socket, envelope.msg_id, "invalid hops");
+      return;
+    }
+    if (envelope.hops >= this.maxHops) {
+      writeNack(socket, envelope.msg_id, "hops exceeded");
+      return;
+    }
+    if (this.followups.has(envelope.msg_id)) {
+      writeNack(socket, envelope.msg_id, "duplicate msg_id");
+      return;
+    }
+
+    const event: RelayFollowupEvent = {
+      kind: "followup",
+      msg_id: envelope.msg_id,
+      sender_session: envelope.sender_session,
+      sender_endpoint: envelope.sender_endpoint,
+      sender_name: envelope.sender_name,
+      sender_cwd: envelope.sender_cwd,
+      parent_msg_id: envelope.parent_msg_id,
+      message: envelope.message,
+      hops: envelope.hops,
+      conversation_id: envelope.conversation_id ?? null,
+      received_at: nowIso(),
+    };
+
+    this.followups.add(envelope.msg_id);
+
+    try {
+      this.emit("followup", event);
+    } catch (error) {
+      this.followups.delete(envelope.msg_id);
+      writeNack(socket, envelope.msg_id, error instanceof Error ? error.message : "followup handler failed");
       return;
     }
 
@@ -522,6 +613,17 @@ function isRelayEnvelope(value: unknown): value is RelayEnvelope {
       typeof prompt.sender_cwd === "string" &&
       typeof prompt.prompt === "string" &&
       typeof prompt.hops === "number"
+    );
+  }
+
+  if (envelope.type === "followup") {
+    const followup = envelope as Partial<FollowupEnvelope>;
+    return (
+      typeof followup.sender_name === "string" &&
+      typeof followup.sender_cwd === "string" &&
+      typeof followup.parent_msg_id === "string" &&
+      typeof followup.message === "string" &&
+      typeof followup.hops === "number"
     );
   }
 
