@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import * as z from "zod/v4";
 import { RelayRuntime } from "../core/runtime.js";
-import type { PeerInfo, RelayPromptEvent, RelayResponseEvent } from "../core/types.js";
+import type { PeerInfo, RelayFollowupEvent, RelayPromptEvent, RelayResponseEvent } from "../core/types.js";
 
 interface CliOptions {
   name?: string;
@@ -49,10 +49,12 @@ const server = new McpServer(
     },
     instructions: [
       "Hearsay Relay is an asynchronous mailbox/event relay between agents.",
-      "Use relay_list_peers to discover peers, relay_send to send async messages, and relay_reply to explicitly answer inbound Relay prompts.",
+      "Use relay_list_peers to discover peers, relay_send to send async messages, relay_followup to steer existing requests, and relay_reply to explicitly answer inbound Relay prompts.",
       "relay_send returns after receiver ACK only; do not poll or wait for a response tool. Responses arrive later as Claude channel notifications.",
+      "relay_followup requires parent_msg_id from an earlier relay_send and does not create a response event or reply obligation.",
       "When delegating work caused by an inbound Relay prompt, pass that inbound prompt's msg_id as relay_send parent_msg_id.",
       "Every inbound Relay prompt should be answered exactly once with relay_reply when ready.",
+      "Inbound Relay follow-up events should not be answered with relay_reply; continue the original prompt and reply to that prompt when ready.",
     ].join("\n"),
   },
 );
@@ -138,6 +140,37 @@ server.registerTool(
 );
 
 server.registerTool(
+  "relay_followup",
+  {
+    title: "Send Relay Follow-Up",
+    description: "Send follow-up steering/context for an existing Relay request. Requires parent_msg_id from an earlier relay_send and does not create a reply obligation.",
+    inputSchema: {
+      target: z.string().describe("Peer name, or session_id. Must match the original relay_send target."),
+      parent_msg_id: z.string().describe("Outbound Relay msg_id from the original relay_send being steered."),
+      message: z.string().describe("Follow-up steering/context message. No reply is required for this follow-up."),
+    },
+  },
+  async ({ target, parent_msg_id, message }) => {
+    const result = await runtime.followup({ target, parent_msg_id, message });
+
+    return {
+      content: [{
+        type: "text" as const,
+        text: [
+          `relay_followup → ${result.target}`,
+          `msg_id: ${result.msg_id}`,
+          `parent_msg_id: ${result.parent_msg_id}`,
+          `status: ${result.status}`,
+          `hops: ${result.hops}`,
+          "No response event will be delivered for this follow-up.",
+        ].join("\n"),
+      }],
+      structuredContent: { ...result },
+    };
+  },
+);
+
+server.registerTool(
   "relay_reply",
   {
     title: "Reply to Relay Prompt",
@@ -174,6 +207,20 @@ runtime.on("prompt", (event) => {
     parent_msg_id: event.parent_msg_id ?? null,
     conversation_id: event.conversation_id ?? null,
     expects_json: event.expects_json,
+  });
+});
+
+runtime.on("followup", (event) => {
+  void notifyClaude(formatFollowupEvent(event), {
+    relay: "hearsay-relay",
+    kind: "followup",
+    msg_id: event.msg_id,
+    parent_msg_id: event.parent_msg_id,
+    sender_name: event.sender_name,
+    sender_session: event.sender_session,
+    sender_cwd: event.sender_cwd,
+    hops: event.hops,
+    conversation_id: event.conversation_id ?? null,
   });
 });
 
@@ -285,6 +332,24 @@ function formatPromptEvent(event: RelayPromptEvent): string {
     "",
     `When ready, answer this Relay prompt by calling relay_reply with msg_id=${event.msg_id}.`,
     `If you delegate work caused by this prompt, call relay_send with parent_msg_id=${event.msg_id}.`,
+  ].join("\n");
+}
+
+function formatFollowupEvent(event: RelayFollowupEvent): string {
+  return [
+    "[Hearsay Relay follow-up]",
+    "kind: followup",
+    `msg_id: ${event.msg_id}`,
+    `parent_msg_id: ${event.parent_msg_id}`,
+    `from: ${event.sender_name} (${event.sender_session})`,
+    `sender_cwd: ${event.sender_cwd}`,
+    `hops: ${event.hops}`,
+    `conversation_id: ${event.conversation_id ?? ""}`,
+    "",
+    event.message,
+    "",
+    "This is steering/context for an existing Relay prompt. No relay_reply is required for this follow-up.",
+    "Continue working on the original prompt and reply to that prompt when ready.",
   ].join("\n");
 }
 

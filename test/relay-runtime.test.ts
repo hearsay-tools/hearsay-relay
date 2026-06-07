@@ -586,7 +586,7 @@ test("Claude channel MCP server exposes relay tools and emits channel notificati
   const tools = await client.listTools();
   assert.deepEqual(
     tools.tools.map((tool) => tool.name).sort(),
-    ["relay_list_peers", "relay_reply", "relay_send"],
+    ["relay_followup", "relay_list_peers", "relay_reply", "relay_send"],
   );
 
   const listed = await client.callTool({ name: "relay_list_peers", arguments: {} });
@@ -601,6 +601,20 @@ test("Claude channel MCP server exposes relay tools and emits channel notificati
   assert.equal(notification.params.meta.msg_id, sentToClaude.msg_id);
   assert.equal(notification.params.meta.sender_name, "kilo");
   assert.match(notification.params.content, /relay_reply/);
+
+  const followupSeen = onceClaudeChannelNotification(client);
+  await kilo.followup({
+    target: "charlie",
+    parent_msg_id: sentToClaude.msg_id,
+    message: "Please treat this as steering, not a second request.",
+  });
+
+  const followupNotification = await withTimeout(followupSeen, 2_000);
+  assert.equal(followupNotification.method, "notifications/claude/channel");
+  assert.equal(followupNotification.params.meta.kind, "followup");
+  assert.equal(followupNotification.params.meta.parent_msg_id, sentToClaude.msg_id);
+  assert.equal(followupNotification.params.meta.sender_name, "kilo");
+  assert.match(followupNotification.params.content, /No relay_reply is required for this follow-up/);
 
   await client.callTool({
     name: "relay_reply",
