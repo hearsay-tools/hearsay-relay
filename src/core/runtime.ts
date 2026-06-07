@@ -396,7 +396,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       writeNack(socket, envelope.msg_id, "hops exceeded");
       return;
     }
-    if (this.followups.has(envelope.msg_id)) {
+    if (this.hasKnownMessageId(envelope.msg_id)) {
       writeNack(socket, envelope.msg_id, "duplicate msg_id");
       return;
     }
@@ -558,6 +558,10 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     if (children.size === 0) this.childrenByParent.delete(parentMsgId);
   }
 
+  private hasKnownMessageId(msgId: string): boolean {
+    return this.inbound.has(msgId) || this.outbound.has(msgId) || this.followups.has(msgId);
+  }
+
   private assertStarted(): void {
     if (!this.started) throw new Error("relay runtime is not started");
   }
@@ -623,7 +627,8 @@ function isRelayEnvelope(value: unknown): value is RelayEnvelope {
       typeof followup.sender_cwd === "string" &&
       typeof followup.parent_msg_id === "string" &&
       typeof followup.message === "string" &&
-      typeof followup.hops === "number"
+      typeof followup.hops === "number" &&
+      (followup.conversation_id == null || typeof followup.conversation_id === "string")
     );
   }
 

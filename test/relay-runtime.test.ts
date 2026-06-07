@@ -240,6 +240,38 @@ test("NACKs duplicate followup envelopes", async () => {
   );
 });
 
+test("NACKs followup msg_id collisions with open inbound prompts", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const promptSeen = oncePrompt(b);
+  const sent = await a.sendPrompt({ target: "bravo", prompt: "root" });
+  const prompt = await promptSeen;
+  assert.equal(prompt.msg_id, sent.msg_id);
+
+  const envelope: FollowupEnvelope = {
+    type: "followup",
+    msg_id: prompt.msg_id,
+    sender_session: a.sessionId,
+    sender_endpoint: a.endpoint,
+    sender_name: a.name,
+    sender_cwd: a.cwd,
+    timestamp: new Date().toISOString(),
+    parent_msg_id: "parent-not-relevant",
+    message: "colliding followup",
+    hops: 0,
+    conversation_id: null,
+  };
+
+  await assert.rejects(
+    sendEnvelope(b.endpoint, envelope),
+    /duplicate msg_id/,
+  );
+  assert.equal(b.getInbound(prompt.msg_id)?.status, "open");
+});
+
 test("NACKs malformed followup envelopes", async () => {
   const relayDir = tempRelayDir();
   const a = runtime({ relayDir, name: "alpha" });
@@ -256,6 +288,23 @@ test("NACKs malformed followup envelopes", async () => {
       parent_msg_id: "missing-parent",
       message: "malformed because sender identity is incomplete",
       hops: 0,
+    }),
+    /malformed envelope/,
+  );
+
+  await assert.rejects(
+    sendEnvelope(b.endpoint, {
+      type: "followup",
+      msg_id: "bad-followup-conversation",
+      sender_session: a.sessionId,
+      sender_endpoint: a.endpoint,
+      sender_name: a.name,
+      sender_cwd: a.cwd,
+      timestamp: new Date().toISOString(),
+      parent_msg_id: "missing-parent",
+      message: "malformed because conversation_id is not string or null",
+      hops: 0,
+      conversation_id: 123,
     }),
     /malformed envelope/,
   );
@@ -287,6 +336,7 @@ test("accepts followup when recipient no longer has parent prompt in memory", as
   assert.equal(followup.msg_id, "orphan-parent-followup");
   assert.equal(followup.parent_msg_id, "parent-not-in-memory");
   assert.equal(followup.message, "still deliver this steering event");
+  assert.equal(b.getInbound(followup.msg_id), undefined);
 });
 
 test("tracks a three-agent delegation chain", async () => {
