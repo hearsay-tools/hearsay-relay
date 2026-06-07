@@ -51,7 +51,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
   pi.registerFlag("relay-project", {
     description: "Hearsay Relay project namespace for peer discovery.",
     type: "string",
-    default: "default",
+    default: undefined,
   });
   pi.registerFlag("relay-purpose", {
     description: "Short description shown to Relay peers.",

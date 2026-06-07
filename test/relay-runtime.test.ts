@@ -6,6 +6,7 @@ import { afterEach, test } from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { RelayRuntime, sendEnvelope, type RelayPromptEvent, type RelayResponseEvent } from "../src/core/index.js";
+import hearsayRelayPiExtension from "../src/pi/extension.js";
 
 const cleanupDirs: string[] = [];
 const liveRuntimes: RelayRuntime[] = [];
@@ -110,6 +111,47 @@ test("hides hidden peers from default discovery", async () => {
 
   const allPeers = await a.listPeers({ ping: false, include_hidden: true });
   assert.deepEqual(allPeers.map((peer) => peer.name), ["bravo"]);
+});
+
+test("pi peers use HEARSAY_RELAY_PROJECT as their default discovery namespace", async () => {
+  const relayDir = tempRelayDir();
+  const sameCwd = path.join(relayDir, "workspace");
+  const peers: FakePi[] = [];
+  const envKeys = ["HEARSAY_RELAY_DIR", "HEARSAY_RELAY_NAME", "HEARSAY_RELAY_PROJECT"] as const;
+  const previousEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+
+  async function startPiPeer(name: string, project: string): Promise<FakePi> {
+    process.env.HEARSAY_RELAY_DIR = relayDir;
+    process.env.HEARSAY_RELAY_NAME = name;
+    process.env.HEARSAY_RELAY_PROJECT = project;
+
+    const pi = new FakePi();
+    hearsayRelayPiExtension(pi);
+    await pi.emit("session_start", {}, { cwd: sameCwd, model: { id: "test-model" } });
+    peers.push(pi);
+    return pi;
+  }
+
+  try {
+    const alpha = await startPiPeer("alpha", "project-x");
+    await startPiPeer("bravo", "project-x");
+    await startPiPeer("charlie", "project-y");
+    await startPiPeer("delta", "project-y");
+
+    const listed = await alpha.callTool("relay_list_peers", {});
+    const details = listed.details as { agents: Array<{ name: string; project: string }>; project: string };
+    assert.equal(details.project, "project-x");
+    assert.deepEqual(details.agents.map((peer) => `${peer.name}@${peer.project}`), ["bravo@project-x"]);
+  } finally {
+    await Promise.allSettled(peers.map((peer) => peer.emit("session_shutdown")));
+    for (const [key, value] of previousEnv) {
+      if (value == null) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 });
 
 test("Claude channel MCP server exposes relay tools and emits channel notifications", async () => {
@@ -280,4 +322,54 @@ function oncePrompt(runtime: RelayRuntime): Promise<RelayPromptEvent> {
 
 function onceResponse(runtime: RelayRuntime): Promise<RelayResponseEvent> {
   return new Promise((resolve) => runtime.once("response", resolve));
+}
+
+class FakePi {
+  private readonly flags = new Map<string, unknown>();
+  private readonly handlers = new Map<string, Array<(...args: any[]) => unknown>>();
+  private readonly tools = new Map<string, Record<string, any>>();
+
+  registerFlag(name: string, options: Record<string, unknown>): void {
+    this.flags.set(name, options.default);
+  }
+
+  getFlag(name: string): unknown {
+    return this.flags.get(name);
+  }
+
+  registerTool(definition: Record<string, any>): void {
+    this.tools.set(String(definition.name), definition);
+  }
+
+  registerCommand(_name: string, _definition: Record<string, unknown>): void {
+    // Not needed by these tests.
+  }
+
+  on(event: string, handler: (...args: any[]) => unknown): void {
+    const handlers = this.handlers.get(event) ?? [];
+    handlers.push(handler);
+    this.handlers.set(event, handlers);
+  }
+
+  sendMessage(_message: Record<string, unknown>, _options?: Record<string, unknown>): void {
+    // Not needed by these tests.
+  }
+
+  appendEntry(_customType: string, _data?: unknown): void {
+    // Not needed by these tests.
+  }
+
+  async emit(event: string, ...args: unknown[]): Promise<void> {
+    for (const handler of this.handlers.get(event) ?? []) {
+      await handler(...args);
+    }
+  }
+
+  async callTool(name: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const tool = this.tools.get(name);
+    if (!tool || typeof tool.execute !== "function") {
+      throw new Error(`unknown fake pi tool: ${name}`);
+    }
+    return await tool.execute("fake-tool-call", params) as Record<string, unknown>;
+  }
 }
