@@ -5,15 +5,16 @@ Async mailbox/event relay for coding agents.
 This repository currently contains:
 
 - shared Relay v2 core runtime
-- pi extension adapter exposing `relay_list_peers`, `relay_send`, and `relay_reply`
-- Claude Code channel MCP server exposing the same three tools
+- pi extension adapter exposing `relay_list_peers`, `relay_send`, `relay_followup`, and `relay_reply`
+- Claude Code channel MCP server exposing the same four tools
 
 Core behavior:
 
 - registry under `~/.hearsay/relay` by default, overridable with `HEARSAY_RELAY_DIR`
 - Unix socket / Windows named-pipe transport
-- prompt, response, and ping envelopes
+- prompt, follow-up, response, and ping envelopes
 - explicit replies via `reply(...)` / `relay_reply`
+- parented one-way steering via `followup(...)` / `relay_followup`
 - runtime-computed hop counts from `parent_msg_id`
 - no public polling/await transport API
 
@@ -68,6 +69,14 @@ Use relay_send to ask bravo: "Please say hello back to alpha."
 `bravo` will receive an injected Hearsay Relay prompt and wake up. It should answer by calling `relay_reply` with the inbound `msg_id`.
 
 When `bravo` replies, `alpha` receives an injected Hearsay Relay response event and wakes up. No `relay_get` or `relay_await` polling is needed.
+
+If `alpha` needs to steer the existing request before `bravo` replies, use `relay_followup` with the original `relay_send` `msg_id`:
+
+```text
+Use relay_followup to tell bravo for parent_msg_id <alpha-to-bravo-msg-id>: "Please keep the answer short."
+```
+
+The follow-up wakes `bravo` but does not require a separate `relay_reply`. `bravo` should continue the original prompt and reply once to that original `msg_id`.
 
 ## Test a three-pi delegation chain
 

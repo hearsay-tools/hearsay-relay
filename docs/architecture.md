@@ -13,12 +13,17 @@ shapes remain canonical in `src/core/types.ts`.
   `relay_reply(msg_id, response)` when ready. The runtime does not infer a
   response from the final assistant message and does not require Stop hooks for
   core behavior.
-- **There are three public model-facing tools.** pi and Claude Code expose
-  `relay_list_peers`, `relay_send`, and `relay_reply`. There is no public
-  `relay_get`, `relay_await`, or `coms_*` compatibility surface in the current
-  architecture.
+- **There are four public model-facing tools.** pi and Claude Code expose
+  `relay_list_peers`, `relay_send`, `relay_followup`, and `relay_reply`. There
+  is no public `relay_get`, `relay_await`, or `coms_*` compatibility surface in
+  the current architecture.
+- **Follow-ups are parented steering events.** `relay_followup(target,
+  parent_msg_id, message)` requires an outbound `relay_send` `msg_id`, sends to
+  that original target endpoint, and never creates a reply obligation.
 - **`msg_id` is the correlation key.** Prompt envelopes mint a new `msg_id`;
-  response envelopes use that original prompt `msg_id`.
+  response envelopes use that original prompt `msg_id`; follow-up envelopes
+  mint their own transport `msg_id` and carry the original prompt id as
+  `parent_msg_id`.
 - **The model supplies `parent_msg_id`, never `hops`.** When a send delegates
   work caused by an inbound prompt, the caller passes the inbound `msg_id` as
   `parent_msg_id`. The runtime derives outgoing hops from trusted local inbound
@@ -77,6 +82,7 @@ one JSON reply line.
 | Envelope | Purpose | Important fields |
 |---|---|---|
 | `prompt` | Ask another peer to do work. | `msg_id`, sender identity/endpoint, `prompt`, `hops`, optional `parent_msg_id`, `conversation_id`, `response_schema`. |
+| `followup` | Add steering/context to an existing request. | `msg_id`, sender identity/endpoint, required `parent_msg_id`, `message`, `hops`, optional `conversation_id`. |
 | `response` | Answer a prior prompt. | original `msg_id`, sender session/endpoint, `response`, optional `error`. |
 | `ping` | Liveness and peer card lookup. | `msg_id`, sender session/endpoint, timestamp. |
 
@@ -122,6 +128,20 @@ B validates, records inbound[msg_id], emits prompt event, ACKs
 A tool call returns { msg_id, status: "sent", target, target_session, hops }
 ```
 
+### Send follow-up
+
+```text
+A relay_followup(target=B, parent_msg_id=<alpha msg>, message=...)
+A validates parent_msg_id against local outbound prompt state
+A sends followup envelope to the endpoint stored on that outbound prompt
+B validates, records the follow-up msg_id for duplicate detection, emits followup event, ACKs
+A tool call returns { msg_id, status: "sent", target, target_session, parent_msg_id, hops }
+```
+
+Follow-ups do not create inbound prompt records and do not produce response
+events. The recipient adapter injects them as steering/context for the original
+prompt.
+
 ### Receive and reply
 
 ```text
@@ -156,6 +176,16 @@ Injected prompt text includes `msg_id`, sender identity, hops,
 instruction to answer with `relay_reply` or delegate with `relay_send` using the
 inbound `msg_id` as `parent_msg_id`.
 
+Runtime follow-up events are delivered with:
+
+```ts
+pi.sendMessage(..., { deliverAs: "steer", triggerTurn: true })
+```
+
+Injected follow-up text includes `msg_id`, `parent_msg_id`, sender identity,
+hops, `conversation_id`, the follow-up body, and an explicit instruction that
+no `relay_reply` is required for the follow-up.
+
 ### Claude Code channel MCP server
 
 The Claude adapter is a stdio MCP server that declares:
@@ -164,9 +194,10 @@ The Claude adapter is a stdio MCP server that declares:
 capabilities: { experimental: { "claude/channel": {} } }
 ```
 
-It exposes the same three public Relay tools and emits inbound prompt/response
-events through `notifications/claude/channel`. Channel metadata is normalized to
-string attributes because Claude Code renders it on `<channel>` messages.
+It exposes the same four public Relay tools and emits inbound prompt/follow-up/
+response events through `notifications/claude/channel`. Channel metadata is
+normalized to string attributes because Claude Code renders it on `<channel>`
+messages.
 
 The runtime is published only after MCP stdio is connected, so other peers do
 not send events before the channel server can notify Claude Code.
