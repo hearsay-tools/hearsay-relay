@@ -349,7 +349,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       writeNack(socket, envelope.msg_id, "hops exceeded");
       return;
     }
-    if (this.inbound.has(envelope.msg_id)) {
+    if (this.hasKnownMessageId(envelope.msg_id)) {
       writeNack(socket, envelope.msg_id, "duplicate msg_id");
       return;
     }

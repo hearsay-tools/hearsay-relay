@@ -9,6 +9,7 @@ import {
   RelayRuntime,
   sendEnvelope,
   type FollowupEnvelope,
+  type PromptEnvelope,
   type RelayFollowupEvent,
   type RelayPromptEvent,
   type RelayResponseEvent,
@@ -270,6 +271,54 @@ test("NACKs followup msg_id collisions with open inbound prompts", async () => {
     /duplicate msg_id/,
   );
   assert.equal(b.getInbound(prompt.msg_id)?.status, "open");
+});
+
+test("NACKs prompt msg_id collisions with accepted followups", async () => {
+  const relayDir = tempRelayDir();
+  const a = runtime({ relayDir, name: "alpha" });
+  const b = runtime({ relayDir, name: "bravo" });
+  await Promise.all([a.start(), b.start()]);
+
+  const followupSeen = onceFollowup(b);
+  const followupEnvelope: FollowupEnvelope = {
+    type: "followup",
+    msg_id: "followup-then-prompt-collision",
+    sender_session: a.sessionId,
+    sender_endpoint: a.endpoint,
+    sender_name: a.name,
+    sender_cwd: a.cwd,
+    timestamp: new Date().toISOString(),
+    parent_msg_id: "parent-not-relevant",
+    message: "accepted followup",
+    hops: 0,
+    conversation_id: null,
+  };
+
+  await sendEnvelope(b.endpoint, followupEnvelope);
+  const followup = await followupSeen;
+  assert.equal(followup.msg_id, followupEnvelope.msg_id);
+  assert.equal(b.getInbound(followup.msg_id), undefined);
+
+  const promptEnvelope: PromptEnvelope = {
+    type: "prompt",
+    msg_id: followup.msg_id,
+    sender_session: a.sessionId,
+    sender_endpoint: a.endpoint,
+    sender_name: a.name,
+    sender_cwd: a.cwd,
+    timestamp: new Date().toISOString(),
+    prompt: "colliding prompt",
+    hops: 0,
+    parent_msg_id: null,
+    conversation_id: null,
+    response_schema: null,
+  };
+
+  await assert.rejects(
+    sendEnvelope(b.endpoint, promptEnvelope),
+    /duplicate msg_id/,
+  );
+  assert.equal(b.getInbound(followup.msg_id), undefined);
 });
 
 test("NACKs malformed followup envelopes", async () => {
