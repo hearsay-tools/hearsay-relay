@@ -45,7 +45,7 @@ shapes remain canonical in `src/core/types.ts`.
 | Protocol/types | `src/core/types.ts` | Owns envelope, registry, state-record, tool-argument, and runtime-event shapes. |
 | Registry/discovery | `src/core/registry.ts` | Owns relay directory layout, registry file validation, dead-entry pruning, and name disambiguation. |
 | Socket transport | `src/core/transport.ts` | Owns newline-delimited JSON over Unix sockets / Windows named pipes plus ACK/NACK/PONG replies. |
-| pi adapter | `src/pi/extension.ts` | Registers pi flags/tools and injects Relay events as follow-up turns. |
+| pi adapter | `src/pi/extension.ts` | Registers pi flags/tools, injects Relay prompt/response events as pi API follow-up turns, and injects Relay followup events as steering turns. |
 | Claude Code adapter | `src/claude/channel-mcp-server.ts` | Runs an MCP server with Claude channel capability, exposes the same tools, and emits channel notifications. |
 | Behavior coverage | `test/relay-runtime.test.ts` | Covers async send/reply, delegation hops, hidden discovery, Claude channel notifications, parent validation, hop limits, duplicate replies, and malformed envelopes. |
 
@@ -198,6 +198,10 @@ It exposes the same four public Relay tools and emits inbound prompt/follow-up/
 response events through `notifications/claude/channel`. Channel metadata is
 normalized to string attributes because Claude Code renders it on `<channel>`
 messages.
+
+Follow-up channel notifications carry metadata with `kind: "followup"`, the
+follow-up transport `msg_id`, `parent_msg_id` for the original prompt being
+steered, sender identity/cwd, hops, and optional `conversation_id`.
 
 The runtime is published only after MCP stdio is connected, so other peers do
 not send events before the channel server can notify Claude Code.
