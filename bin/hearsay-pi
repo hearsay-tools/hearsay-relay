@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Launch a pi agent connected to the hearsay-relay as a named peer.
+#
+# Unlike hearsay-claude, pi joins the relay through a pi *extension* (-e), not
+# an MCP channel: the extension starts the relay runtime on session_start and
+# stops it on session_shutdown. So there's no temporary MCP registration to add
+# or clean up, and no --dangerously-load-development-channels flag. There's also
+# no ccs --profile here: ccs switches Claude accounts, and pi uses its own
+# provider/auth.
+#
+# usage: hearsay-pi <project> <name> <purpose> [extra pi args...]
+#   e.g. hearsay-pi hearsay architect "Architect for the hearsay project"
+#        hearsay-pi demo worker "Worker" --model anthropic/sonnet
+
+set -euo pipefail
+
+self="$0"
+while [[ -L "$self" ]]; do
+  target="$(readlink "$self")"
+  if [[ "$target" == /* ]]; then
+    self="$target"
+  else
+    self="$(cd "$(dirname "$self")" && pwd)/$target"
+  fi
+done
+repo_root="$(cd "$(dirname "$self")/.." && pwd)"
+PI_EXTENSION="${HEARSAY_PI_EXTENSION:-$repo_root/dist/src/pi/extension.js}"
+
+if [[ $# -lt 3 ]]; then
+  echo "usage: hearsay-pi <project> <name> <purpose> [extra pi args...]" >&2
+  exit 1
+fi
+
+project=$1
+name=$2
+purpose=$3
+shift 3
+
+exec pi -e "$PI_EXTENSION" \
+  --relay-project "$project" \
+  --relay-name "$name" \
+  --relay-purpose "$purpose" \
+  "$@"

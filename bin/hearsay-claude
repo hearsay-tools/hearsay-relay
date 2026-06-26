@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Launch a Claude Code session with a temporary hearsay-relay channel peer.
+#
+# Registers the relay MCP server under a role-unique name (local scope, so
+# concurrent roles in the same directory don't collide), starts claude with
+# the channel dev flag for exactly that server, and removes the registration
+# when the session ends — even on Ctrl+C or crash.
+#
+# With --profile, every claude invocation (mcp add/remove and the session
+# itself) goes through `ccs <profile>` so the registration lands in that
+# profile's own .claude.json.
+#
+# usage: hearsay-claude [-p|--profile <ccs-profile>] <project> <name> <purpose> [extra claude args...]
+#   e.g. hearsay-claude hearsay architect "Architect for the hearsay project"
+#        hearsay-claude -p work proficienct-hub sales-engineer "Sales engineer"
+
+set -euo pipefail
+
+self="$0"
+while [[ -L "$self" ]]; do
+  target="$(readlink "$self")"
+  if [[ "$target" == /* ]]; then
+    self="$target"
+  else
+    self="$(cd "$(dirname "$self")" && pwd)/$target"
+  fi
+done
+repo_root="$(cd "$(dirname "$self")/.." && pwd)"
+RELAY_SERVER="${HEARSAY_RELAY_SERVER:-$repo_root/dist/src/claude/channel-mcp-server.js}"
+
+usage() {
+  echo "usage: hearsay-claude [-p|--profile <ccs-profile>] <project> <name> <purpose> [extra claude args...]" >&2
+  exit 1
+}
+
+launcher=(claude)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p|--profile)
+      [[ $# -ge 2 ]] || usage
+      launcher=(ccs "$2")
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -ge 3 ]] || usage
+project=$1
+name=$2
+purpose=$3
+shift 3
+
+server_name="hearsay-relay-${project}-${name}"
+
+cleanup() {
+  "${launcher[@]}" mcp remove -s local "$server_name" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# Clear a stale registration left behind by a previous crashed run.
+cleanup
+
+"${launcher[@]}" mcp add -s local "$server_name" -- node "$RELAY_SERVER" \
+  --name "$name" --project "$project" --purpose "$purpose"
+
+"${launcher[@]}" --dangerously-load-development-channels "server:${server_name}" "$@"

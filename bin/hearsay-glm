@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# hearsay-claude, but routed through z.ai's GLM models instead of Anthropic.
+#
+# Mirrors the `zlaude` shell alias: same ANTHROPIC_* env overrides, applied to
+# every claude invocation the core wrapper makes (mcp add/remove + session).
+# All arguments are passed straight through to hearsay-claude.
+#
+# usage: hearsay-glm [-p|--profile <ccs-profile>] <project> <name> <purpose> [extra claude args...]
+#   e.g. hearsay-glm hearsay architect "Architect for the hearsay project"
+
+set -euo pipefail
+
+if [[ -z "${ZAI_API_KEY:-}" ]]; then
+  echo "hearsay-glm: ZAI_API_KEY is not set in the environment" >&2
+  exit 1
+fi
+
+export ANTHROPIC_AUTH_TOKEN="$ZAI_API_KEY"
+export ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic"
+export API_TIMEOUT_MS="3000000"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="GLM-5.2"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="GLM-5.2"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="GLM-5-turbo"
+
+# Resolve through the symlink so we always find the sibling core script.
+self="$0"
+while [[ -L "$self" ]]; do
+  target="$(readlink "$self")"
+  if [[ "$target" == /* ]]; then
+    self="$target"
+  else
+    self="$(cd "$(dirname "$self")" && pwd)/$target"
+  fi
+done
+exec "$(cd "$(dirname "$self")" && pwd)/hearsay-claude" "$@"
