@@ -2,11 +2,22 @@ import { Type } from "@sinclair/typebox";
 import { RelayRuntime } from "../core/runtime.js";
 import type { PeerInfo, RelayFollowupEvent, RelayPromptEvent, RelayResponseEvent } from "../core/types.js";
 
+type PiComponent = {
+  render(width: number): string[];
+  invalidate(): void;
+};
+
+type PiTheme = {
+  fg?: (color: string, text: string) => string;
+  bold?: (text: string) => string;
+};
+
 type PiApi = {
   registerFlag: (name: string, options: Record<string, unknown>) => void;
   getFlag: (name: string) => unknown;
   registerTool: (definition: Record<string, unknown>) => void;
   registerCommand: (name: string, definition: Record<string, unknown>) => void;
+  registerMessageRenderer?: (customType: string, renderer: (message: Record<string, unknown>, options: { expanded?: boolean }, theme: PiTheme) => PiComponent) => void;
   on: (event: string, handler: (...args: any[]) => unknown) => void;
   sendMessage: (message: Record<string, unknown>, options?: Record<string, unknown>) => void;
   appendEntry?: (customType: string, data?: unknown) => void;
@@ -24,12 +35,12 @@ type PiContext = {
 };
 
 const relayListPeersParams = Type.Object({
-  project: Type.Optional(Type.String({ description: "Project name, or \"*\" for all projects. Defaults to this agent's project." })),
+  project: Type.Optional(Type.String({ description: "Omit to list peers in this agent's own project (the default). Pass a project name to target another, or \"*\" for all projects — only when explicitly requested." })),
   include_hidden: Type.Optional(Type.Boolean({ description: "Include peers started with --relay-hidden. Default false." })),
 });
 
 const relaySendParams = Type.Object({
-  target: Type.String({ description: "Peer name, or session_id." }),
+  target: Type.String({ description: "Use a peer name only inside this peer's current project; use session_id for peers in any other project." }),
   prompt: Type.String({ description: "Message/prompt to send to the peer." }),
   parent_msg_id: Type.Optional(Type.String({ description: "Inbound Relay msg_id this send delegates from. The runtime uses this to compute hops." })),
   conversation_id: Type.Optional(Type.String({ description: "Optional conversation/thread correlation id." })),
@@ -37,7 +48,7 @@ const relaySendParams = Type.Object({
 });
 
 const relayFollowupParams = Type.Object({
-  target: Type.String({ description: "Peer name, or session_id. Must match the original relay_send target." }),
+  target: Type.String({ description: "Use a peer name only inside this peer's current project; use session_id for peers in any other project. Must match the original relay_send target." }),
   parent_msg_id: Type.String({ description: "Outbound Relay msg_id from the original relay_send being steered." }),
   message: Type.String({ description: "Follow-up steering/context message. No reply is required for this follow-up." }),
 });
@@ -83,11 +94,19 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
   let runtime: RelayRuntime | null = null;
   let currentCtx: PiContext | null = null;
 
+  pi.registerMessageRenderer?.("hearsay-relay", (message, options, theme) => {
+    return renderRelayMessage(message, options.expanded === true, theme);
+  });
+
   pi.registerTool({
     name: "relay_list_peers",
     label: "List Relay Peers",
-    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_hidden=true reveals hidden peers.",
+    description: "List Hearsay Relay peers in this peer's own project. Only pass project=\"*\" (scan all projects) or another project name when the user explicitly asks for it; otherwise omit project. include_hidden=true reveals hidden peers.",
     promptSnippet: "List Hearsay Relay peer agents available for async messages.",
+    promptGuidelines: [
+      "When talking to the human about Relay peers, use the human-readable name@project label rather than raw session_id unless the session id is explicitly needed.",
+      "For relay_send/relay_followup targets, use a peer name only when the peer is in this peer's current project; use session_id for peers in other projects.",
+    ],
     parameters: relayListPeersParams,
     async execute(_toolCallId: string, params: { project?: string; include_hidden?: boolean }) {
       const relay = requireRuntime(runtime);
@@ -98,7 +117,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       });
 
       return {
-        content: [{ type: "text", text: formatPeerList(peers) }],
+        content: [{ type: "text", text: formatPeerList(peers, relay.project) }],
         details: { agents: peers, project: params.project ?? relay.project },
       };
     },
@@ -111,9 +130,21 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
     promptSnippet: "Send an async Hearsay Relay message to another peer; response arrives later as an injected Relay event.",
     promptGuidelines: [
       "Use relay_send for asynchronous Hearsay Relay messages; it returns only after receiver ACK and must not be followed by polling.",
+      "Use peer names as relay_send targets only within this peer's current project; for cross-project sends, use the target peer's session_id from relay_list_peers.",
+      "When telling the human where a Relay message went, use the human-readable name@project label, not the raw session_id unless asked.",
       "When delegating work caused by an inbound Relay prompt, pass that inbound prompt's msg_id as relay_send parent_msg_id.",
     ],
     parameters: relaySendParams,
+    renderCall(args: { target?: string; prompt?: string; parent_msg_id?: string; conversation_id?: string }, theme: PiTheme) {
+      return renderRelayToolCall("relay_send", args.target ?? "?", args.prompt ?? "", theme, [
+        args.parent_msg_id ? `parent_msg_id: ${args.parent_msg_id}` : "",
+        args.conversation_id ? `conversation_id: ${args.conversation_id}` : "",
+      ]);
+    },
+    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme, context?: { args?: { prompt?: string } }) {
+      const details = result.details as { target?: string; target_project?: string; msg_id?: string; hops?: number } | undefined;
+      return renderRelayToolResult("relay_send", details, context?.args?.prompt ?? "", theme);
+    },
     async execute(_toolCallId: string, params: {
       target: string;
       prompt: string;
@@ -134,7 +165,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
         content: [{
           type: "text",
           text: [
-            `relay_send → ${result.target}`,
+            `relay_send → ${formatAgentLabel(result.target, result.target_project)}`,
             `msg_id: ${result.msg_id}`,
             `status: ${result.status}`,
             `hops: ${result.hops}`,
@@ -154,9 +185,20 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
     promptGuidelines: [
       "Use relay_followup to steer or add context to an existing relay_send without asking the peer to reply twice.",
       "Pass the original relay_send msg_id as parent_msg_id. The target must be the same peer as the original send.",
+      "Use peer names as relay_followup targets only within this peer's current project; for cross-project follow-ups, use the target peer's session_id from the original relay_send result.",
+      "When telling the human where a Relay follow-up went, use the human-readable name@project label, not the raw session_id unless asked.",
       "Do not call relay_reply for inbound follow-up events; reply only to the original Relay prompt when ready.",
     ],
     parameters: relayFollowupParams,
+    renderCall(args: { target?: string; parent_msg_id?: string; message?: string }, theme: PiTheme) {
+      return renderRelayToolCall("relay_followup", args.target ?? "?", args.message ?? "", theme, [
+        args.parent_msg_id ? `parent_msg_id: ${args.parent_msg_id}` : "",
+      ]);
+    },
+    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme, context?: { args?: { message?: string } }) {
+      const details = result.details as { target?: string; target_project?: string; msg_id?: string; parent_msg_id?: string; hops?: number } | undefined;
+      return renderRelayToolResult("relay_followup", details, context?.args?.message ?? "", theme);
+    },
     async execute(_toolCallId: string, params: { target: string; parent_msg_id: string; message: string }) {
       const relay = requireRuntime(runtime);
       const result = await relay.followup({
@@ -169,7 +211,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
         content: [{
           type: "text",
           text: [
-            `relay_followup → ${result.target}`,
+            `relay_followup → ${formatAgentLabel(result.target, result.target_project)}`,
             `msg_id: ${result.msg_id}`,
             `parent_msg_id: ${result.parent_msg_id}`,
             `status: ${result.status}`,
@@ -192,6 +234,18 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       "Do not rely on the final assistant message as a Relay response; call relay_reply explicitly with the intended payload.",
     ],
     parameters: relayReplyParams,
+    renderCall(args: { msg_id?: string; response?: unknown; error?: string }, theme: PiTheme) {
+      return renderRelayToolCall("relay_reply", args.msg_id ?? "?", formatUnknown(args.response), theme, [
+        args.error ? `error: ${args.error}` : "",
+      ]);
+    },
+    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme) {
+      const details = result.details as { msg_id?: string } | undefined;
+      return relayTextComponent([
+        style(theme, "success", "✓ relay_reply sent"),
+        details?.msg_id ? style(theme, "dim", `msg_id: ${details.msg_id}`) : "",
+      ]);
+    },
     async execute(_toolCallId: string, params: { msg_id: string; response: unknown; error?: string }) {
       const relay = requireRuntime(runtime);
       const result = await relay.reply({
@@ -220,7 +274,7 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
         `Relay: ${relay.name}@${relay.project}`,
         `Session: ${relay.sessionId}`,
         `${peers.length} peer(s):`,
-        ...peers.map(formatPeerLine),
+        ...peers.map((peer) => formatPeerLine(peer, relay.project)),
       ].join("\n");
       ctx.ui?.notify?.(message, "info");
     },
@@ -311,11 +365,12 @@ function injectPrompt(pi: PiApi, ctx: PiContext | null, event: RelayPromptEvent)
     details: event,
   }, { deliverAs: "followUp", triggerTurn: true });
 
-  ctx.ui?.notify?.(`Relay prompt from ${event.sender_name}: ${event.msg_id}`, "info");
+  ctx.ui?.notify?.(`Relay prompt from ${formatAgentLabel(event.sender_name, event.sender_project)}: ${event.msg_id}`, "info");
   pi.appendEntry?.("hearsay-relay-log", {
     event: "inbound_prompt",
     msg_id: event.msg_id,
     sender_name: event.sender_name,
+    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     hops: event.hops,
   });
@@ -331,12 +386,13 @@ function injectFollowup(pi: PiApi, ctx: PiContext | null, event: RelayFollowupEv
     details: event,
   }, { deliverAs: "steer", triggerTurn: true });
 
-  ctx.ui?.notify?.(`Relay follow-up from ${event.sender_name}: ${event.parent_msg_id}`, "info");
+  ctx.ui?.notify?.(`Relay follow-up from ${formatAgentLabel(event.sender_name, event.sender_project)}: ${event.parent_msg_id}`, "info");
   pi.appendEntry?.("hearsay-relay-log", {
     event: "inbound_followup",
     msg_id: event.msg_id,
     parent_msg_id: event.parent_msg_id,
     sender_name: event.sender_name,
+    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     hops: event.hops,
   });
@@ -355,11 +411,12 @@ function injectResponse(pi: PiApi, ctx: PiContext | null, event: RelayResponseEv
     // because the local UI/session injection failed.
   }
 
-  ctx?.ui?.notify?.(`${orphan ? "Orphan Relay response" : "Relay response"} from ${event.sender_name}: ${event.msg_id}`, orphan ? "warning" : "info");
+  ctx?.ui?.notify?.(`${orphan ? "Orphan Relay response" : "Relay response"} from ${formatAgentLabel(event.sender_name, event.sender_project)}: ${event.msg_id}`, orphan ? "warning" : "info");
   pi.appendEntry?.("hearsay-relay-log", {
     event: orphan ? "orphan_response" : "inbound_response",
     msg_id: event.msg_id,
     sender_name: event.sender_name,
+    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     error: event.error ?? null,
   });
@@ -370,7 +427,7 @@ function formatPromptEvent(event: RelayPromptEvent): string {
     "[Hearsay Relay inbound prompt]",
     `kind: prompt`,
     `msg_id: ${event.msg_id}`,
-    `from: ${event.sender_name} (${event.sender_session})`,
+    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
     `sender_cwd: ${event.sender_cwd}`,
     `hops: ${event.hops}`,
     `parent_msg_id: ${event.parent_msg_id ?? ""}`,
@@ -390,7 +447,7 @@ function formatFollowupEvent(event: RelayFollowupEvent): string {
     `kind: followup`,
     `msg_id: ${event.msg_id}`,
     `parent_msg_id: ${event.parent_msg_id}`,
-    `from: ${event.sender_name} (${event.sender_session})`,
+    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
     `sender_cwd: ${event.sender_cwd}`,
     `hops: ${event.hops}`,
     `conversation_id: ${event.conversation_id ?? ""}`,
@@ -407,23 +464,128 @@ function formatResponseEvent(event: RelayResponseEvent, orphan: boolean): string
     orphan ? "[Hearsay Relay orphan response]" : "[Hearsay Relay response]",
     `kind: response`,
     `msg_id: ${event.msg_id}`,
-    `from: ${event.sender_name} (${event.sender_session})`,
+    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
     `error: ${event.error ?? ""}`,
     "",
     formatUnknown(event.response),
   ].join("\n");
 }
 
-function formatPeerList(peers: PeerInfo[]): string {
-  if (peers.length === 0) return "0 Relay peer(s).";
-  return [`${peers.length} Relay peer(s):`, ...peers.map(formatPeerLine)].join("\n");
+function renderRelayMessage(message: Record<string, unknown>, expanded: boolean, theme: PiTheme): PiComponent {
+  const details = message.details as Record<string, unknown> | undefined;
+  const kind = getString(details, "kind") ?? "relay";
+  const sender = formatAgentLabel(getString(details, "sender_name") ?? "unknown", getString(details, "sender_project"));
+  const icon = kind === "prompt" ? "📩" : kind === "followup" ? "↪" : "📬";
+  const hops = getNumber(details, "hops");
+  const title = [
+    style(theme, "accent", `${icon} ${sender} → me`),
+    style(theme, "muted", `${kind}`),
+    getString(details, "msg_id") ? style(theme, "dim", `${getString(details, "msg_id")}`) : "",
+    hops != null ? style(theme, "dim", `hops ${hops}`) : "",
+    details?.orphan === true ? style(theme, "warning", "orphan") : "",
+  ].filter(Boolean).join(" · ");
+
+  const body = kind === "prompt"
+    ? String(getString(details, "prompt") ?? message.content ?? "")
+    : kind === "followup"
+      ? String(getString(details, "message") ?? message.content ?? "")
+      : formatUnknown(details?.response ?? message.content ?? "");
+
+  const lines = [title, ...body.split("\n")];
+  if (expanded) {
+    lines.push(
+      "",
+      style(theme, "dim", `sender_session: ${getString(details, "sender_session") ?? ""}`),
+      style(theme, "dim", `sender_cwd: ${getString(details, "sender_cwd") ?? ""}`),
+      style(theme, "dim", `parent_msg_id: ${getString(details, "parent_msg_id") ?? ""}`),
+      style(theme, "dim", `conversation_id: ${getString(details, "conversation_id") ?? ""}`),
+      style(theme, "dim", `received_at: ${getString(details, "received_at") ?? ""}`),
+    );
+  }
+  return relayTextComponent(lines);
 }
 
-function formatPeerLine(peer: PeerInfo): string {
+function renderRelayToolCall(tool: string, target: string, body: string, theme: PiTheme, metadata: string[] = []): PiComponent {
+  return relayTextComponent([
+    `${style(theme, "accent", "📡")} ${style(theme, "toolTitle", tool)} ${style(theme, "muted", "→")} ${target}`,
+    ...metadata.filter(Boolean).map((line) => style(theme, "dim", line)),
+    "",
+    body,
+  ]);
+}
+
+function renderRelayToolResult(tool: string, details: { target?: string; target_project?: string; msg_id?: string; parent_msg_id?: string; hops?: number } | undefined, body: string, theme: PiTheme): PiComponent {
+  const target = details?.target ? formatAgentLabel(details.target, details.target_project) : "?";
+  return relayTextComponent([
+    `${style(theme, "success", "✓")} ${style(theme, "toolTitle", tool)} ${style(theme, "muted", "→")} ${target}`,
+    details?.msg_id ? style(theme, "dim", `msg_id: ${details.msg_id}`) : "",
+    details?.parent_msg_id ? style(theme, "dim", `parent_msg_id: ${details.parent_msg_id}`) : "",
+    typeof details?.hops === "number" ? style(theme, "dim", `hops: ${details.hops}`) : "",
+    "",
+    body,
+  ]);
+}
+
+function relayTextComponent(lines: string[]): PiComponent {
+  return {
+    render(width: number): string[] {
+      const rendered: string[] = [];
+      for (const line of lines.filter((entry, index) => entry !== "" || index < lines.length - 1)) {
+        rendered.push(...wrapPlainLine(line, Math.max(1, width)));
+      }
+      return rendered.length > 0 ? rendered : [""];
+    },
+    invalidate(): void {
+      // Stateless component.
+    },
+  };
+}
+
+function wrapPlainLine(line: string, width: number): string[] {
+  if (line.length <= width) return [line];
+  const chunks: string[] = [];
+  let rest = line;
+  while (rest.length > width) {
+    chunks.push(rest.slice(0, width));
+    rest = rest.slice(width);
+  }
+  chunks.push(rest);
+  return chunks;
+}
+
+function style(theme: PiTheme, color: string, text: string): string {
+  return theme.fg?.(color, text) ?? text;
+}
+
+function getString(record: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function getNumber(record: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = record?.[key];
+  return typeof value === "number" ? value : undefined;
+}
+
+function formatPeerList(peers: PeerInfo[], currentProject: string): string {
+  if (peers.length === 0) return "0 Relay peer(s).";
+  return [
+    `${peers.length} Relay peer(s):`,
+    "Use name@project when talking to the human. Use relay_target for relay_send/relay_followup; cross-project relay_target is a session_id.",
+    ...peers.map((peer) => formatPeerLine(peer, currentProject)),
+  ].join("\n");
+}
+
+function formatPeerLine(peer: PeerInfo, currentProject: string): string {
   const live = peer.alive ? "●" : "✗";
   const context = peer.agent_card?.context_used_pct == null ? "?%" : `${peer.agent_card.context_used_pct}%`;
   const purpose = peer.purpose ? ` — ${peer.purpose}` : "";
-  return `${live} ${peer.name} (${peer.model}) ${context} project=${peer.project} session=${peer.session_id}${purpose}`;
+  const relayTarget = peer.project === currentProject ? peer.name : peer.session_id;
+  return `${live} ${formatAgentLabel(peer.name, peer.project)} (${peer.model}) ${context} relay_target=${relayTarget} session_id=${peer.session_id}${purpose}`;
+}
+
+function formatAgentLabel(name: string, project?: string | null): string {
+  return project ? `${name}@${project}` : name;
 }
 
 function formatUnknown(value: unknown): string {

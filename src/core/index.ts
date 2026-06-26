@@ -1,4 +1,16 @@
 export { RelayRuntime } from "./runtime.js";
+export {
+  appendRelayEventLog,
+  makeRelayEventLogEntry,
+  readRelayEventLog,
+  relayEventLogPath,
+} from "./event-log.js";
+export type {
+  RelayEventLogEntry,
+  RelayEventLogInput,
+  RelayEventName,
+  RelayEventPeerSnapshot,
+} from "./event-log.js";
 export { sendEnvelope } from "./transport.js";
 export {
   defaultRelayDir,

@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Async mailbox/event relay between coding agents.",
   "bin": {
-    "hearsay-relay-claude": "./dist/src/claude/channel-mcp-server.js"
+    "hearsay-relay-claude": "./dist/src/claude/channel-mcp-server.js",
+    "hearsay-relay-monitor": "./dist/src/monitor/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
