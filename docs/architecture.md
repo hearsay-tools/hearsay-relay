@@ -31,8 +31,7 @@ shapes remain canonical in `src/core/types.ts`.
 - **Transport ACK is not semantic completion.** ACK/NACK/PONG only describe
   local receipt/liveness. The semantic answer is a later response envelope.
 - **Runtime state is in memory.** The filesystem registry is discovery state,
-  not durable pending-message storage. Observability is written separately as
-  append-only event journals.
+  not durable pending-message storage.
 - **Hidden peers are opt-in for discovery.** Peers started as hidden are omitted
   from normal peer lists unless `include_hidden=true`.
 - **`response_schema` is currently advisory.** It is transported and causes
@@ -45,7 +44,6 @@ shapes remain canonical in `src/core/types.ts`.
 | Core runtime and state machine | `src/core/runtime.ts` | Owns start/stop, peer listing, send/reply, hop calculation, inbound/outbound records, and runtime events. |
 | Protocol/types | `src/core/types.ts` | Owns envelope, registry, state-record, tool-argument, and runtime-event shapes. |
 | Registry/discovery | `src/core/registry.ts` | Owns relay directory layout, registry file validation, dead-entry pruning, and name disambiguation. |
-| Shared event log | `src/core/event-log.ts` | Owns versioned JSONL event entries for lifecycle and message observability. |
 | Socket transport | `src/core/transport.ts` | Owns newline-delimited JSON over Unix sockets / Windows named pipes plus ACK/NACK/PONG replies. |
 | pi adapter | `src/pi/extension.ts` | Registers pi flags/tools, injects Relay prompt/response events as pi API follow-up turns, and injects Relay followup events as steering turns. |
 | Claude Code adapter | `src/claude/channel-mcp-server.ts` | Runs an MCP server with Claude channel capability, exposes the same tools, and emits channel notifications. |
@@ -59,7 +57,6 @@ overridable with `HEARSAY_RELAY_DIR` or adapter flags.
 ```text
 <relayDir>/
   projects/<project>/agents/<encodeURIComponent(name)>.json
-  projects/<project>/events.jsonl
   sockets/<session_id>.sock        # Unix only; Windows uses named pipes
 ```
 
@@ -75,10 +72,7 @@ agent card containing name, purpose, model, color, context usage, and open queue
 depth.
 
 Target resolution for `relay_send` prefers a name in the sender's current
-project, then a session id across all projects. Agents should describe peers to
-humans with the human-readable `name@project` label, but cross-project
-`relay_send`/`relay_followup` tool calls should use the target's `session_id`
-from `relay_list_peers`.
+project, then a session id across all projects, then a name across all projects.
 
 ## Transport protocol
 
@@ -120,19 +114,6 @@ dependency-aware guards.
 
 Unknown response envelopes produce an `orphan_response` runtime event and are
 still ACKed so the sender can complete its transport call.
-
-## Shared event log and monitor
-
-Every runtime appends best-effort versioned JSONL events to the project event
-journal. Entries include `schema_version`, `event_id`, `observed_at`, `project`,
-`observer`, optional `from`/`to` peer snapshots, message ids, conversation ids,
-and full prompt/follow-up/response bodies where applicable.
-
-The journal records lifecycle events plus message attempt/received/acked/failed
-observations. The standalone `hearsay-relay-monitor` is a read-only log
-observer: it tails `events.jsonl`, folds send/receive observations into
-conversation-first transcripts, and never opens a relay socket or appears in
-peer discovery.
 
 ## Message flows
 

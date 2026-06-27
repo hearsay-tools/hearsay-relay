@@ -1,8 +1,6 @@
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import type net from "node:net";
-import { appendRelayEventLog } from "./event-log.js";
-import type { RelayEventLogInput, RelayEventPeerSnapshot } from "./event-log.js";
 import { fallbackColor, isValidHexColor, makeId, nowIso } from "./ids.js";
 import {
   defaultRelayDir,
@@ -118,11 +116,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       });
       this.registryFile = writeRegistryAtomic(this.relayDir, this.makeRegistryEntry());
       this.started = true;
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "runtime_started",
-      });
     } catch (error) {
       await this.closeServer();
       if (process.platform !== "win32") {
@@ -138,13 +131,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
 
   async stop(): Promise<void> {
     if (!this.started && !this.server) return;
-    if (this.started) {
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "runtime_stopped",
-      });
-    }
     this.started = false;
     await this.closeServer();
     removeRegistryEntry(this.relayDir, this.project, this.runtimeName);
@@ -194,18 +180,7 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
 
     const target = this.resolveTarget(args.target);
     if (!target) {
-      const message = `no live relay peer matching ${JSON.stringify(args.target)}`;
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "prompt_send_failed",
-        from: this.localPeerSnapshot(),
-        prompt: args.prompt,
-        parent_msg_id: args.parent_msg_id ?? null,
-        conversation_id: args.conversation_id ?? null,
-        error: message,
-      });
-      throw new Error(message);
+      throw new Error(`no live relay peer matching ${JSON.stringify(args.target)}`);
     }
 
     const parentMsgId = args.parent_msg_id ?? null;
@@ -217,7 +192,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       msg_id: msgId,
       target_session: target.session_id,
       target_name: target.name,
-      target_project: target.project,
       target_endpoint: target.endpoint,
       parent_msg_id: parentMsgId,
       conversation_id: args.conversation_id ?? null,
@@ -230,27 +204,12 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     this.outbound.set(msgId, record);
     if (parentMsgId) this.addChild(parentMsgId, msgId);
 
-    this.logRelayEvent({
-      project: this.project,
-      observer: this.localPeerSnapshot(),
-      event: "prompt_send_attempt",
-      msg_id: msgId,
-      parent_msg_id: parentMsgId,
-      conversation_id: args.conversation_id ?? null,
-      hops,
-      from: this.localPeerSnapshot(),
-      to: registryPeerSnapshot(target),
-      prompt: args.prompt,
-      expects_json: args.response_schema != null,
-    });
-
     const envelope: PromptEnvelope = {
       type: "prompt",
       msg_id: msgId,
       sender_session: this.sessionId,
       sender_endpoint: this.endpointPath,
       sender_name: this.runtimeName,
-      sender_project: this.project,
       sender_cwd: this.cwd,
       timestamp: sentAt,
       prompt: args.prompt,
@@ -266,41 +225,13 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       record.status = "error";
       record.error = error instanceof Error ? error.message : String(error);
       if (parentMsgId) this.removeChild(parentMsgId, msgId);
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "prompt_send_failed",
-        msg_id: msgId,
-        parent_msg_id: parentMsgId,
-        conversation_id: args.conversation_id ?? null,
-        hops,
-        from: this.localPeerSnapshot(),
-        to: registryPeerSnapshot(target),
-        prompt: args.prompt,
-        error: record.error,
-        expects_json: args.response_schema != null,
-      });
       throw error;
     }
-
-    this.logRelayEvent({
-      project: this.project,
-      observer: this.localPeerSnapshot(),
-      event: "prompt_send_acked",
-      msg_id: msgId,
-      parent_msg_id: parentMsgId,
-      conversation_id: args.conversation_id ?? null,
-      hops,
-      from: this.localPeerSnapshot(),
-      to: registryPeerSnapshot(target),
-      status: "acked",
-    });
 
     return {
       msg_id: msgId,
       status: "sent",
       target: target.name,
-      target_project: target.project,
       target_session: target.session_id,
       hops,
     };
@@ -317,42 +248,18 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     if (parent.status !== "sent") {
       throw new Error(`parent_msg_id ${args.parent_msg_id} is not open`);
     }
-    const targetMatchesParent = args.target === parent.target_session || (
-      parent.target_project === this.project && args.target === parent.target_name
-    );
-    if (!targetMatchesParent) {
-      throw new Error(`target ${args.target} does not match parent_msg_id ${args.parent_msg_id} target ${parent.target_name}@${parent.target_project}`);
+    if (args.target !== parent.target_name && args.target !== parent.target_session) {
+      throw new Error(`target ${args.target} does not match parent_msg_id ${args.parent_msg_id} target ${parent.target_name}`);
     }
 
     const msgId = makeId("msg");
     const sentAt = nowIso();
-    const target: RelayEventPeerSnapshot = {
-      name: parent.target_name,
-      project: parent.target_project,
-      session_id: parent.target_session,
-      endpoint: parent.target_endpoint,
-    };
-
-    this.logRelayEvent({
-      project: this.project,
-      observer: this.localPeerSnapshot(),
-      event: "followup_send_attempt",
-      msg_id: msgId,
-      parent_msg_id: parent.msg_id,
-      conversation_id: parent.conversation_id ?? null,
-      hops: parent.hops,
-      from: this.localPeerSnapshot(),
-      to: target,
-      message: args.message,
-    });
-
     const envelope: FollowupEnvelope = {
       type: "followup",
       msg_id: msgId,
       sender_session: this.sessionId,
       sender_endpoint: this.endpointPath,
       sender_name: this.runtimeName,
-      sender_project: this.project,
       sender_cwd: this.cwd,
       timestamp: sentAt,
       parent_msg_id: parent.msg_id,
@@ -361,43 +268,12 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       conversation_id: parent.conversation_id ?? null,
     };
 
-    try {
-      await sendEnvelope(parent.target_endpoint, envelope);
-    } catch (error) {
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "followup_send_failed",
-        msg_id: msgId,
-        parent_msg_id: parent.msg_id,
-        conversation_id: parent.conversation_id ?? null,
-        hops: parent.hops,
-        from: this.localPeerSnapshot(),
-        to: target,
-        message: args.message,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-
-    this.logRelayEvent({
-      project: this.project,
-      observer: this.localPeerSnapshot(),
-      event: "followup_send_acked",
-      msg_id: msgId,
-      parent_msg_id: parent.msg_id,
-      conversation_id: parent.conversation_id ?? null,
-      hops: parent.hops,
-      from: this.localPeerSnapshot(),
-      to: target,
-      status: "acked",
-    });
+    await sendEnvelope(parent.target_endpoint, envelope);
 
     return {
       msg_id: msgId,
       status: "sent",
       target: parent.target_name,
-      target_project: parent.target_project,
       target_session: parent.target_session,
       parent_msg_id: parent.msg_id,
       hops: parent.hops,
@@ -410,65 +286,17 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     if (!inbound) throw new Error(`unknown inbound msg_id ${args.msg_id}`);
     if (inbound.status !== "open") throw new Error(`inbound msg_id ${args.msg_id} is not open`);
 
-    const responseProject = inbound.sender_project ?? this.project;
-    const responseTarget = inboundPeerSnapshot(inbound);
     const envelope: ResponseEnvelope = {
       type: "response",
       msg_id: inbound.msg_id,
       sender_session: this.sessionId,
       sender_endpoint: this.endpointPath,
-      sender_project: this.project,
       timestamp: nowIso(),
       response: args.response,
       error: args.error ?? null,
     };
 
-    this.logRelayEvent({
-      project: responseProject,
-      observer: this.localPeerSnapshot(),
-      event: "response_send_attempt",
-      msg_id: inbound.msg_id,
-      parent_msg_id: inbound.parent_msg_id ?? null,
-      conversation_id: inbound.conversation_id ?? null,
-      hops: inbound.hops,
-      from: this.localPeerSnapshot(),
-      to: responseTarget,
-      response: args.response,
-      error: args.error ?? null,
-    });
-
-    try {
-      await sendEnvelope(inbound.sender_endpoint, envelope);
-    } catch (error) {
-      this.logRelayEvent({
-        project: responseProject,
-        observer: this.localPeerSnapshot(),
-        event: "response_send_failed",
-        msg_id: inbound.msg_id,
-        parent_msg_id: inbound.parent_msg_id ?? null,
-        conversation_id: inbound.conversation_id ?? null,
-        hops: inbound.hops,
-        from: this.localPeerSnapshot(),
-        to: responseTarget,
-        response: args.response,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw error;
-    }
-
-    this.logRelayEvent({
-      project: responseProject,
-      observer: this.localPeerSnapshot(),
-      event: "response_send_acked",
-      msg_id: inbound.msg_id,
-      parent_msg_id: inbound.parent_msg_id ?? null,
-      conversation_id: inbound.conversation_id ?? null,
-      hops: inbound.hops,
-      from: this.localPeerSnapshot(),
-      to: responseTarget,
-      status: "acked",
-    });
-
+    await sendEnvelope(inbound.sender_endpoint, envelope);
     inbound.status = "replied";
     inbound.replied_at = nowIso();
     return { msg_id: args.msg_id, status: "sent" };
@@ -531,7 +359,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       sender_session: envelope.sender_session,
       sender_endpoint: envelope.sender_endpoint,
       sender_name: envelope.sender_name,
-      sender_project: envelope.sender_project ?? null,
       sender_cwd: envelope.sender_cwd,
       prompt: envelope.prompt,
       hops: envelope.hops,
@@ -557,20 +384,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       return;
     }
 
-    this.logRelayEvent({
-      project: envelope.sender_project ?? this.project,
-      observer: this.localPeerSnapshot(),
-      event: "prompt_received",
-      msg_id: envelope.msg_id,
-      parent_msg_id: envelope.parent_msg_id ?? null,
-      conversation_id: envelope.conversation_id ?? null,
-      hops: envelope.hops,
-      from: envelopeSenderSnapshot(envelope),
-      to: this.localPeerSnapshot(),
-      prompt: envelope.prompt,
-      expects_json: envelope.response_schema != null,
-    });
-
     writeAck(socket, envelope.msg_id);
   }
 
@@ -594,7 +407,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       sender_session: envelope.sender_session,
       sender_endpoint: envelope.sender_endpoint,
       sender_name: envelope.sender_name,
-      sender_project: envelope.sender_project ?? null,
       sender_cwd: envelope.sender_cwd,
       parent_msg_id: envelope.parent_msg_id,
       message: envelope.message,
@@ -613,19 +425,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       return;
     }
 
-    this.logRelayEvent({
-      project: envelope.sender_project ?? this.project,
-      observer: this.localPeerSnapshot(),
-      event: "followup_received",
-      msg_id: envelope.msg_id,
-      parent_msg_id: envelope.parent_msg_id,
-      conversation_id: envelope.conversation_id ?? null,
-      hops: envelope.hops,
-      from: envelopeSenderSnapshot(envelope),
-      to: this.localPeerSnapshot(),
-      message: envelope.message,
-    });
-
     writeAck(socket, envelope.msg_id);
   }
 
@@ -636,7 +435,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       msg_id: envelope.msg_id,
       sender_session: envelope.sender_session,
       sender_name: outbound?.target_name ?? envelope.sender_session,
-      sender_project: outbound?.target_project ?? envelope.sender_project ?? null,
       response: envelope.response,
       error: envelope.error ?? null,
       received_at: nowIso(),
@@ -648,17 +446,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       } catch {
         // The response is already orphaned; still ACK so the remote can finish.
       }
-      this.logRelayEvent({
-        project: this.project,
-        observer: this.localPeerSnapshot(),
-        event: "orphan_response_received",
-        msg_id: envelope.msg_id,
-        from: responseSenderSnapshot(envelope, event),
-        to: this.localPeerSnapshot(),
-        response: envelope.response,
-        error: envelope.error ?? null,
-        orphan: true,
-      });
       writeAck(socket, envelope.msg_id);
       return;
     }
@@ -674,21 +461,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       writeNack(socket, envelope.msg_id, error instanceof Error ? error.message : "response handler failed");
       return;
     }
-
-    this.logRelayEvent({
-      project: this.project,
-      observer: this.localPeerSnapshot(),
-      event: "response_received",
-      msg_id: envelope.msg_id,
-      parent_msg_id: outbound.parent_msg_id ?? null,
-      conversation_id: outbound.conversation_id ?? null,
-      hops: outbound.hops,
-      from: responseSenderSnapshot(envelope, event),
-      to: this.localPeerSnapshot(),
-      response: envelope.response,
-      error: envelope.error ?? null,
-      orphan: false,
-    });
 
     writeAck(socket, envelope.msg_id);
   }
@@ -725,7 +497,10 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     if (localByName) return localByName;
 
     const allEntries = pruneDeadEntriesAcrossProjects(this.relayDir);
-    return allEntries.find((entry) => entry.session_id === target) ?? null;
+    const bySession = allEntries.find((entry) => entry.session_id === target);
+    if (bySession) return bySession;
+
+    return allEntries.find((entry) => entry.name === target) ?? null;
   }
 
   private computeOutgoingHops(parentMsgId: string | null): number {
@@ -791,25 +566,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
     if (!this.started) throw new Error("relay runtime is not started");
   }
 
-  private localPeerSnapshot(): RelayEventPeerSnapshot {
-    return {
-      name: this.runtimeName,
-      project: this.project,
-      session_id: this.sessionId,
-      endpoint: this.endpointPath,
-      cwd: this.cwd,
-      model: this.model,
-    };
-  }
-
-  private logRelayEvent(event: RelayEventLogInput): void {
-    try {
-      appendRelayEventLog(this.relayDir, event);
-    } catch {
-      // Relay event logging is best-effort and must not affect delivery.
-    }
-  }
-
   private async closeServer(): Promise<void> {
     const server = this.server;
     this.server = null;
@@ -823,46 +579,6 @@ export class RelayRuntime extends EventEmitter<RelayRuntimeEvents> {
       }
     });
   }
-}
-
-function registryPeerSnapshot(entry: RegistryEntry): RelayEventPeerSnapshot {
-  return {
-    name: entry.name,
-    project: entry.project,
-    session_id: entry.session_id,
-    endpoint: entry.endpoint,
-    cwd: entry.cwd,
-    model: entry.model,
-  };
-}
-
-function inboundPeerSnapshot(record: InboundPromptRecord): RelayEventPeerSnapshot {
-  return {
-    name: record.sender_name,
-    project: record.sender_project ?? null,
-    session_id: record.sender_session,
-    endpoint: record.sender_endpoint,
-    cwd: record.sender_cwd,
-  };
-}
-
-function envelopeSenderSnapshot(envelope: PromptEnvelope | FollowupEnvelope): RelayEventPeerSnapshot {
-  return {
-    name: envelope.sender_name,
-    project: envelope.sender_project ?? null,
-    session_id: envelope.sender_session,
-    endpoint: envelope.sender_endpoint,
-    cwd: envelope.sender_cwd,
-  };
-}
-
-function responseSenderSnapshot(envelope: ResponseEnvelope, event: RelayResponseEvent): RelayEventPeerSnapshot {
-  return {
-    name: event.sender_name,
-    project: event.sender_project ?? envelope.sender_project ?? null,
-    session_id: envelope.sender_session,
-    endpoint: envelope.sender_endpoint,
-  };
 }
 
 function normalizeMaxHops(value: number | undefined): number {
@@ -898,7 +614,6 @@ function isRelayEnvelope(value: unknown): value is RelayEnvelope {
     const prompt = envelope as Partial<PromptEnvelope>;
     return (
       typeof prompt.sender_name === "string" &&
-      isOptionalString(prompt.sender_project) &&
       typeof prompt.sender_cwd === "string" &&
       typeof prompt.prompt === "string" &&
       typeof prompt.hops === "number"
@@ -909,7 +624,6 @@ function isRelayEnvelope(value: unknown): value is RelayEnvelope {
     const followup = envelope as Partial<FollowupEnvelope>;
     return (
       typeof followup.sender_name === "string" &&
-      isOptionalString(followup.sender_project) &&
       typeof followup.sender_cwd === "string" &&
       typeof followup.parent_msg_id === "string" &&
       typeof followup.message === "string" &&
@@ -919,13 +633,8 @@ function isRelayEnvelope(value: unknown): value is RelayEnvelope {
   }
 
   if (envelope.type === "response") {
-    const response = envelope as Partial<ResponseEnvelope>;
-    return "response" in response && isOptionalString(response.sender_project);
+    return "response" in envelope;
   }
 
   return envelope.type === "ping";
-}
-
-function isOptionalString(value: unknown): boolean {
-  return value == null || typeof value === "string";
 }

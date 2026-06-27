@@ -16,7 +16,6 @@ Core behavior:
 - explicit replies via `reply(...)` / `relay_reply`
 - parented one-way steering via `followup(...)` / `relay_followup`
 - runtime-computed hop counts from `parent_msg_id`
-- shared append-only project event logs under `<relayDir>/projects/<project>/events.jsonl`
 - no public polling/await transport API
 
 ## Architecture
@@ -189,7 +188,7 @@ claude mcp list
 ### Useful flags
 
 - `--relay-name <name>`: peer name
-- `--relay-project <project>`: discovery namespace; peers must share this to find each other by name. Agents should talk to humans using `name@project`, but use `session_id` for cross-project `relay_send`/`relay_followup` targets.
+- `--relay-project <project>`: discovery namespace; peers must share this to find each other by name
 - `--relay-purpose <text>`: short peer description
 - `--relay-color <#RRGGBB>`: optional display color
 - `--relay-hidden`: hide from normal `relay_list_peers` unless `include_hidden=true`
@@ -200,18 +199,6 @@ You can also set `HEARSAY_RELAY_DIR` to isolate a test network:
 ```sh
 export HEARSAY_RELAY_DIR=/tmp/hearsay-relay-demo
 ```
-
-## Watch Relay traffic
-
-Build first, then run the read-only monitor against a project event log:
-
-```sh
-npm run build
-node dist/src/monitor/cli.js --project demo
-# installed package binary: hearsay-relay-monitor --project demo
-```
-
-The monitor folds the shared JSONL event journal into conversation-first transcripts. It observes only the log and registry files; it does not join the relay as a peer.
 
 ## Core smoke flow
 

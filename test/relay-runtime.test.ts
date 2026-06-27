@@ -45,7 +45,6 @@ test("sends prompt asynchronously and delivers explicit reply", async () => {
   assert.equal(prompt.kind, "prompt");
   assert.equal(prompt.msg_id, sent.msg_id);
   assert.equal(prompt.sender_name, "alpha");
-  assert.equal(prompt.sender_project, "test");
   assert.equal(prompt.prompt, "hello");
   assert.equal(prompt.status, "open");
 
@@ -55,48 +54,9 @@ test("sends prompt asynchronously and delivers explicit reply", async () => {
   assert.equal(response.kind, "response");
   assert.equal(response.msg_id, sent.msg_id);
   assert.equal(response.sender_name, "bravo");
-  assert.equal(response.sender_project, "test");
   assert.equal(response.response, "world");
   assert.equal(a.getOutbound(sent.msg_id)?.status, "responded");
   assert.equal(b.getInbound(sent.msg_id)?.status, "replied");
-});
-
-test("does not resolve cross-project names but accepts cross-project session ids", async () => {
-  const relayDir = tempRelayDir();
-  const a = runtime({ relayDir, name: "alpha", project: "project-x" });
-  const b = runtime({ relayDir, name: "bravo", project: "project-y" });
-  const c = runtime({ relayDir, name: "bravo", project: "project-z" });
-  await Promise.all([a.start(), b.start(), c.start()]);
-
-  await assert.rejects(
-    a.sendPrompt({ target: "bravo", prompt: "cross-project name should not resolve" }),
-    /no live relay peer matching "bravo"/,
-  );
-
-  const promptSeen = oncePrompt(b);
-  const sent = await a.sendPrompt({ target: b.sessionId, prompt: "session ids work across projects" });
-  assert.equal(sent.target, "bravo");
-  assert.equal(sent.target_project, "project-y");
-  assert.equal(sent.target_session, b.sessionId);
-
-  const prompt = await promptSeen;
-  assert.equal(prompt.sender_name, "alpha");
-  assert.equal(prompt.sender_project, "project-x");
-  assert.equal(prompt.prompt, "session ids work across projects");
-
-  await assert.rejects(
-    a.followup({ target: "bravo", parent_msg_id: sent.msg_id, message: "cross-project followup name should not match" }),
-    /target bravo does not match parent_msg_id .* target bravo@project-y/,
-  );
-
-  const followupSeen = onceFollowup(b);
-  const followed = await a.followup({ target: b.sessionId, parent_msg_id: sent.msg_id, message: "cross-project session followup" });
-  assert.equal(followed.target_project, "project-y");
-
-  const followup = await followupSeen;
-  assert.equal(followup.sender_name, "alpha");
-  assert.equal(followup.sender_project, "project-x");
-  assert.equal(followup.message, "cross-project session followup");
 });
 
 test("delivers followup without creating reply obligation", async () => {

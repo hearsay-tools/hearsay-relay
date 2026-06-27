@@ -6,7 +6,6 @@ export interface PromptEnvelope {
   sender_session: string;
   sender_endpoint: string;
   sender_name: string;
-  sender_project?: string;
   sender_cwd: string;
   timestamp: string;
   prompt: string;
@@ -22,7 +21,6 @@ export interface FollowupEnvelope {
   sender_session: string;
   sender_endpoint: string;
   sender_name: string;
-  sender_project?: string;
   sender_cwd: string;
   timestamp: string;
   parent_msg_id: string;
@@ -36,7 +34,6 @@ export interface ResponseEnvelope {
   msg_id: string;
   sender_session: string;
   sender_endpoint: string;
-  sender_project?: string;
   timestamp: string;
   response: unknown;
   error?: string | null;
@@ -107,7 +104,6 @@ export interface InboundPromptRecord {
   sender_session: string;
   sender_endpoint: string;
   sender_name: string;
-  sender_project?: string | null;
   sender_cwd: string;
   prompt: string;
   hops: number;
@@ -123,7 +119,6 @@ export interface OutboundPromptRecord {
   msg_id: string;
   target_session: string;
   target_name: string;
-  target_project: string;
   target_endpoint: string;
   parent_msg_id?: string | null;
   conversation_id?: string | null;
@@ -168,7 +163,6 @@ export interface RelaySendResult {
   msg_id: string;
   status: "sent";
   target: string;
-  target_project: string;
   target_session: string;
   hops: number;
 }
@@ -183,7 +177,6 @@ export interface RelayFollowupResult {
   msg_id: string;
   status: "sent";
   target: string;
-  target_project: string;
   target_session: string;
   parent_msg_id: string;
   hops: number;
@@ -212,7 +205,6 @@ export interface RelayFollowupEvent {
   sender_session: string;
   sender_endpoint: string;
   sender_name: string;
-  sender_project?: string | null;
   sender_cwd: string;
   parent_msg_id: string;
   message: string;
@@ -226,7 +218,6 @@ export interface RelayResponseEvent {
   msg_id: string;
   sender_session: string;
   sender_name: string;
-  sender_project?: string | null;
   response: unknown;
   error?: string | null;
   received_at: string;

@@ -52,8 +52,6 @@ const server = new McpServer(
       "Use relay_list_peers to discover peers, relay_send to send async messages, relay_followup to steer existing requests, and relay_reply to explicitly answer inbound Relay prompts.",
       "relay_send returns after receiver ACK only; do not poll or wait for a response tool. Responses arrive later as Claude channel notifications.",
       "relay_followup requires parent_msg_id from an earlier relay_send and does not create a response event or reply obligation.",
-      "When talking to the human about Relay peers, use the human-readable name@project label rather than raw session_id unless the session id is explicitly needed.",
-      "Use peer names as relay_send/relay_followup targets only within this peer's current project; for cross-project targets, use the peer's session_id from relay_list_peers.",
       "When delegating work caused by an inbound Relay prompt, pass that inbound prompt's msg_id as relay_send parent_msg_id.",
       "Every inbound Relay prompt should be answered exactly once with relay_reply when ready.",
       "Inbound Relay follow-up events should not be answered with relay_reply; continue the original prompt and reply to that prompt when ready.",
@@ -83,9 +81,9 @@ server.registerTool(
   "relay_list_peers",
   {
     title: "List Relay Peers",
-    description: "List Hearsay Relay peers in this peer's own project. Only pass project=\"*\" (scan all projects) or another project name when the user explicitly asks for it; otherwise omit project. include_hidden=true reveals hidden peers.",
+    description: "List Hearsay Relay peers. Use project=\"*\" to scan all projects. include_hidden=true reveals hidden peers.",
     inputSchema: {
-      project: z.string().optional().describe("Omit to list peers in this Claude peer's own project (the default). Pass a project name to target another, or '*' for all projects — only when explicitly requested."),
+      project: z.string().optional().describe("Project name, or '*' for all projects. Defaults to this Claude peer's project."),
       include_hidden: z.boolean().optional().describe("Include peers started as hidden. Default false."),
     },
   },
@@ -97,7 +95,7 @@ server.registerTool(
     });
 
     return {
-      content: [{ type: "text" as const, text: formatPeerList(peers, runtime.project) }],
+      content: [{ type: "text" as const, text: formatPeerList(peers) }],
       structuredContent: { agents: peers, project: project ?? runtime.project },
     };
   },
@@ -109,7 +107,7 @@ server.registerTool(
     title: "Send Relay Message",
     description: "Send an async Hearsay Relay message to a peer. Returns after receiver ACK with {msg_id,status:'sent'}; it does not wait for the final response.",
     inputSchema: {
-      target: z.string().describe("Use a peer name only inside this peer's current project; use session_id for peers in any other project."),
+      target: z.string().describe("Peer name, or session_id."),
       prompt: z.string().describe("Message/prompt to send to the peer."),
       parent_msg_id: z.string().optional().describe("Inbound Relay msg_id this send delegates from. The runtime uses it to compute hops."),
       conversation_id: z.string().optional().describe("Optional conversation/thread correlation id."),
@@ -129,7 +127,7 @@ server.registerTool(
       content: [{
         type: "text" as const,
         text: [
-          `relay_send → ${formatAgentLabel(result.target, result.target_project)}`,
+          `relay_send → ${result.target}`,
           `msg_id: ${result.msg_id}`,
           `status: ${result.status}`,
           `hops: ${result.hops}`,
@@ -147,7 +145,7 @@ server.registerTool(
     title: "Send Relay Follow-Up",
     description: "Send follow-up steering/context for an existing Relay request. Requires parent_msg_id from an earlier relay_send and does not create a reply obligation.",
     inputSchema: {
-      target: z.string().describe("Use a peer name only inside this peer's current project; use session_id for peers in any other project. Must match the original relay_send target."),
+      target: z.string().describe("Peer name, or session_id. Must match the original relay_send target."),
       parent_msg_id: z.string().describe("Outbound Relay msg_id from the original relay_send being steered."),
       message: z.string().describe("Follow-up steering/context message. No reply is required for this follow-up."),
     },
@@ -159,7 +157,7 @@ server.registerTool(
       content: [{
         type: "text" as const,
         text: [
-          `relay_followup → ${formatAgentLabel(result.target, result.target_project)}`,
+          `relay_followup → ${result.target}`,
           `msg_id: ${result.msg_id}`,
           `parent_msg_id: ${result.parent_msg_id}`,
           `status: ${result.status}`,
@@ -203,7 +201,6 @@ runtime.on("prompt", (event) => {
     kind: "prompt",
     msg_id: event.msg_id,
     sender_name: event.sender_name,
-    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     sender_cwd: event.sender_cwd,
     hops: event.hops,
@@ -220,7 +217,6 @@ runtime.on("followup", (event) => {
     msg_id: event.msg_id,
     parent_msg_id: event.parent_msg_id,
     sender_name: event.sender_name,
-    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     sender_cwd: event.sender_cwd,
     hops: event.hops,
@@ -234,7 +230,6 @@ runtime.on("response", (event) => {
     kind: "response",
     msg_id: event.msg_id,
     sender_name: event.sender_name,
-    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     error: event.error ?? null,
     orphan: false,
@@ -247,7 +242,6 @@ runtime.on("orphan_response", (event) => {
     kind: "response",
     msg_id: event.msg_id,
     sender_name: event.sender_name,
-    sender_project: event.sender_project ?? null,
     sender_session: event.sender_session,
     error: event.error ?? null,
     orphan: true,
@@ -327,7 +321,7 @@ function formatPromptEvent(event: RelayPromptEvent): string {
     "[Hearsay Relay inbound prompt]",
     "kind: prompt",
     `msg_id: ${event.msg_id}`,
-    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
+    `from: ${event.sender_name} (${event.sender_session})`,
     `sender_cwd: ${event.sender_cwd}`,
     `hops: ${event.hops}`,
     `parent_msg_id: ${event.parent_msg_id ?? ""}`,
@@ -347,7 +341,7 @@ function formatFollowupEvent(event: RelayFollowupEvent): string {
     "kind: followup",
     `msg_id: ${event.msg_id}`,
     `parent_msg_id: ${event.parent_msg_id}`,
-    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
+    `from: ${event.sender_name} (${event.sender_session})`,
     `sender_cwd: ${event.sender_cwd}`,
     `hops: ${event.hops}`,
     `conversation_id: ${event.conversation_id ?? ""}`,
@@ -364,32 +358,23 @@ function formatResponseEvent(event: RelayResponseEvent, orphan: boolean): string
     orphan ? "[Hearsay Relay orphan response]" : "[Hearsay Relay response]",
     "kind: response",
     `msg_id: ${event.msg_id}`,
-    `from: ${formatAgentLabel(event.sender_name, event.sender_project)} (${event.sender_session})`,
+    `from: ${event.sender_name} (${event.sender_session})`,
     `error: ${event.error ?? ""}`,
     "",
     formatUnknown(event.response),
   ].join("\n");
 }
 
-function formatPeerList(peers: PeerInfo[], currentProject: string): string {
+function formatPeerList(peers: PeerInfo[]): string {
   if (peers.length === 0) return "0 Relay peer(s).";
-  return [
-    `${peers.length} Relay peer(s):`,
-    "Use name@project when talking to the human. Use relay_target for relay_send/relay_followup; cross-project relay_target is a session_id.",
-    ...peers.map((peer) => formatPeerLine(peer, currentProject)),
-  ].join("\n");
+  return [`${peers.length} Relay peer(s):`, ...peers.map(formatPeerLine)].join("\n");
 }
 
-function formatPeerLine(peer: PeerInfo, currentProject: string): string {
+function formatPeerLine(peer: PeerInfo): string {
   const live = peer.alive ? "●" : "✗";
   const context = peer.agent_card?.context_used_pct == null ? "?%" : `${peer.agent_card.context_used_pct}%`;
   const purpose = peer.purpose ? ` — ${peer.purpose}` : "";
-  const relayTarget = peer.project === currentProject ? peer.name : peer.session_id;
-  return `${live} ${formatAgentLabel(peer.name, peer.project)} (${peer.model}) ${context} relay_target=${relayTarget} session_id=${peer.session_id}${purpose}`;
-}
-
-function formatAgentLabel(name: string, project?: string | null): string {
-  return project ? `${name}@${project}` : name;
+  return `${live} ${peer.name} (${peer.model}) ${context} project=${peer.project} session=${peer.session_id}${purpose}`;
 }
 
 function formatUnknown(value: unknown): string {
