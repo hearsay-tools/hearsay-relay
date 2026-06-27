@@ -135,16 +135,6 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       "When delegating work caused by an inbound Relay prompt, pass that inbound prompt's msg_id as relay_send parent_msg_id.",
     ],
     parameters: relaySendParams,
-    renderCall(args: { target?: string; prompt?: string; parent_msg_id?: string; conversation_id?: string }, theme: PiTheme) {
-      return renderRelayToolCall("relay_send", args.target ?? "?", args.prompt ?? "", theme, [
-        args.parent_msg_id ? `parent_msg_id: ${args.parent_msg_id}` : "",
-        args.conversation_id ? `conversation_id: ${args.conversation_id}` : "",
-      ]);
-    },
-    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme, context?: { args?: { prompt?: string } }) {
-      const details = result.details as { target?: string; target_project?: string; msg_id?: string; hops?: number } | undefined;
-      return renderRelayToolResult("relay_send", details, context?.args?.prompt ?? "", theme);
-    },
     async execute(_toolCallId: string, params: {
       target: string;
       prompt: string;
@@ -190,15 +180,6 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       "Do not call relay_reply for inbound follow-up events; reply only to the original Relay prompt when ready.",
     ],
     parameters: relayFollowupParams,
-    renderCall(args: { target?: string; parent_msg_id?: string; message?: string }, theme: PiTheme) {
-      return renderRelayToolCall("relay_followup", args.target ?? "?", args.message ?? "", theme, [
-        args.parent_msg_id ? `parent_msg_id: ${args.parent_msg_id}` : "",
-      ]);
-    },
-    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme, context?: { args?: { message?: string } }) {
-      const details = result.details as { target?: string; target_project?: string; msg_id?: string; parent_msg_id?: string; hops?: number } | undefined;
-      return renderRelayToolResult("relay_followup", details, context?.args?.message ?? "", theme);
-    },
     async execute(_toolCallId: string, params: { target: string; parent_msg_id: string; message: string }) {
       const relay = requireRuntime(runtime);
       const result = await relay.followup({
@@ -234,18 +215,6 @@ export default function hearsayRelayPiExtension(pi: PiApi) {
       "Do not rely on the final assistant message as a Relay response; call relay_reply explicitly with the intended payload.",
     ],
     parameters: relayReplyParams,
-    renderCall(args: { msg_id?: string; response?: unknown; error?: string }, theme: PiTheme) {
-      return renderRelayToolCall("relay_reply", args.msg_id ?? "?", formatUnknown(args.response), theme, [
-        args.error ? `error: ${args.error}` : "",
-      ]);
-    },
-    renderResult(result: { details?: unknown }, _options: unknown, theme: PiTheme) {
-      const details = result.details as { msg_id?: string } | undefined;
-      return relayTextComponent([
-        style(theme, "success", "✓ relay_reply sent"),
-        details?.msg_id ? style(theme, "dim", `msg_id: ${details.msg_id}`) : "",
-      ]);
-    },
     async execute(_toolCallId: string, params: { msg_id: string; response: unknown; error?: string }) {
       const relay = requireRuntime(runtime);
       const result = await relay.reply({
@@ -503,27 +472,6 @@ function renderRelayMessage(message: Record<string, unknown>, expanded: boolean,
     );
   }
   return relayTextComponent(lines);
-}
-
-function renderRelayToolCall(tool: string, target: string, body: string, theme: PiTheme, metadata: string[] = []): PiComponent {
-  return relayTextComponent([
-    `${style(theme, "accent", "📡")} ${style(theme, "toolTitle", tool)} ${style(theme, "muted", "→")} ${target}`,
-    ...metadata.filter(Boolean).map((line) => style(theme, "dim", line)),
-    "",
-    body,
-  ]);
-}
-
-function renderRelayToolResult(tool: string, details: { target?: string; target_project?: string; msg_id?: string; parent_msg_id?: string; hops?: number } | undefined, body: string, theme: PiTheme): PiComponent {
-  const target = details?.target ? formatAgentLabel(details.target, details.target_project) : "?";
-  return relayTextComponent([
-    `${style(theme, "success", "✓")} ${style(theme, "toolTitle", tool)} ${style(theme, "muted", "→")} ${target}`,
-    details?.msg_id ? style(theme, "dim", `msg_id: ${details.msg_id}`) : "",
-    details?.parent_msg_id ? style(theme, "dim", `parent_msg_id: ${details.parent_msg_id}`) : "",
-    typeof details?.hops === "number" ? style(theme, "dim", `hops: ${details.hops}`) : "",
-    "",
-    body,
-  ]);
 }
 
 function relayTextComponent(lines: string[]): PiComponent {
